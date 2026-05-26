@@ -55,6 +55,16 @@ python3 -m sync extract --slice-index 0 --slice-total 2   # machine 1
 python3 -m sync extract --slice-index 1 --slice-total 2   # machine 2
 ```
 
+### Upload to HuggingFace
+
+```bash
+# Upload all untracked parquet files (smallest-first, 50 per batch)
+python3 -m sync upload
+
+# Custom batch size
+python3 -m sync upload --batch-size 100
+```
+
 ### Entity layout
 
 ```

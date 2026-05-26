@@ -2,14 +2,14 @@
 """Orchestrate OpenAlex snapshot data management.
 
 Usage:
-    python sync/run.py sync [--entity ENTITY] [--workers N]
-    python sync/run.py extract [--entity ENTITY] [--workers N]
-    python sync/run.py commit [--message MSG]
-    python sync/run.py push
-    python sync/run.py full [--entity ENTITY] [--workers N]
+    python -m sync sync [--entity ENTITY] [--workers N]
+    python -m sync extract [--entity ENTITY] [--workers N]
+    python -m sync upload [--batch-size N] [--max-retries N]
+    python -m sync commit [--message MSG]
+    python -m sync push
+    python -m sync full [--entity ENTITY] [--workers N]
 
-All commands run from the repo root (openalex-snapshot/).
-PYTHONPATH must include the repo root for `from sync.xxx import` to work.
+All commands run from the repo root (parent of openalex-snapshot/).
 """
 from __future__ import annotations
 
@@ -97,6 +97,78 @@ def cmd_push(args) -> None:
     _git("push", check=False)
 
 
+def cmd_upload(args) -> None:
+    """Upload untracked parquet files to HuggingFace in size-sorted batches."""
+    import subprocess
+
+    batch_size = args.batch_size
+    max_retries = args.max_retries
+
+    # Find all parquet files on disk
+    all_parquets = set()
+    for p in SYNC_ROOT.rglob("*.parquet"):
+        if not p.name.startswith("._"):
+            all_parquets.add(str(p.relative_to(SYNC_ROOT)))
+
+    # Find already-tracked parquet files
+    r = _git("ls-files")
+    tracked = {f for f in r.stdout.strip().split("\n") if f.endswith(".parquet")}
+
+    untracked = all_parquets - tracked
+    if not untracked:
+        log("All parquet files already tracked")
+        return
+
+    # Sort by file size (smallest first)
+    untracked_with_size = []
+    for rel in untracked:
+        full = SYNC_ROOT / rel
+        try:
+            sz = full.stat().st_size
+        except OSError:
+            sz = 0
+        untracked_with_size.append((sz, rel))
+    untracked_with_size.sort()
+
+    total = len(untracked_with_size)
+    log(f"{total} untracked parquet files, sorted smallest-first")
+
+    batch_num = 0
+    for i in range(0, total, batch_size):
+        chunk = untracked_with_size[i:i + batch_size]
+        batch_num += 1
+        paths = [rel for _, rel in chunk]
+
+        # Stage
+        _git("add", "--", *paths)
+
+        # Commit
+        n = len(chunk)
+        _git(
+            "-c", "diff.renames=false",
+            "commit", "-m",
+            f"feat: add parquet shards batch {batch_num} ({n} files, smallest-first)",
+        )
+
+        # Push with retry
+        pushed = False
+        for attempt in range(1, max_retries + 1):
+            r = _git("push", check=False)
+            if r.returncode == 0:
+                pushed = True
+                break
+            log(f"  push attempt {attempt} failed, retrying in 30s...")
+            time.sleep(30)
+
+        if not pushed:
+            log(f"  batch {batch_num} failed after {max_retries} attempts — aborting")
+            sys.exit(1)
+
+        log(f"  batch {batch_num} ({min(i + n, total)}/{total}) pushed {time.strftime('%H:%M:%S')}")
+
+    log("ALL DONE")
+
+
 def cmd_full(args) -> None:
     """Full pipeline: sync → extract → commit → push."""
     cmd_sync(args)
@@ -137,6 +209,11 @@ def main():
     # push
     subparsers.add_parser("push", help="Git push")
 
+    # upload
+    p_upload = subparsers.add_parser("upload", help="Upload untracked parquet to HF in size-sorted batches")
+    p_upload.add_argument("--batch-size", type=int, default=50, help="Files per commit (default: 50)")
+    p_upload.add_argument("--max-retries", type=int, default=3, help="Push retries per batch (default: 3)")
+
     # full
     p_full = subparsers.add_parser("full", help="sync → extract → commit → push")
     p_full.add_argument("--entity", type=str, default=None)
@@ -149,6 +226,7 @@ def main():
         "extract": cmd_extract,
         "commit": cmd_commit,
         "push": cmd_push,
+        "upload": cmd_upload,
         "full": cmd_full,
     }
     handlers[args.command](args)
