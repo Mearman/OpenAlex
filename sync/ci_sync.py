@@ -290,7 +290,9 @@ SyncResult = dict  # {"entity": str, "s3_key": str, "status": str, "files": int,
 
 
 # HF free-tier rate limit: 128 commits per hour. Stay well under with batches.
-COMMIT_BATCH_SIZE = 25
+COMMIT_BATCH_SIZE = 50
+# Maximum retries for a batch commit (handles 429 rate limits).
+COMMIT_MAX_RETRIES = 3
 
 
 def sync_shards(
@@ -389,26 +391,51 @@ def sync_shards(
                     f"  [{processed}/{total}] FAILED {s3_key}: {exc}"
                 )
 
-        # Commit the batch
+        # Commit the batch with retries for rate limiting
         if batch_ops:
-            try:
-                api.create_commit(
-                    repo_id=HF_REPO_ID,
-                    repo_type="dataset",
-                    operations=batch_ops,
-                    commit_message=f"feat: sync {len(batch_ops)} files from {len(batch)} shards",
-                )
-                print(f"  Committed batch of {len(batch_ops)} files")
-            except Exception as exc:
+            committed = False
+            for attempt in range(COMMIT_MAX_RETRIES):
+                try:
+                    api.create_commit(
+                        repo_id=HF_REPO_ID,
+                        repo_type="dataset",
+                        operations=batch_ops,
+                        commit_message=f"feat: sync {len(batch_ops)} files from {len(batch)} shards",
+                    )
+                    print(f"  Committed batch of {len(batch_ops)} files")
+                    committed = True
+                    consecutive_failures = 0
+                    break
+                except Exception as exc:
+                    exc_str = str(exc)
+                    if "429" in exc_str or "rate limit" in exc_str.lower():
+                        # Parse retry-after from the error message
+                        import re
+                        match = re.search(r"Retry after (\d+) seconds", exc_str)
+                        wait = int(match.group(1)) if match else 300
+                        # Cap the wait at 5 minutes for safety
+                        wait = min(wait, 300)
+                        if attempt < COMMIT_MAX_RETRIES - 1:
+                            print(
+                                f"  Rate limited, waiting {wait}s "
+                                f"(attempt {attempt + 1}/{COMMIT_MAX_RETRIES})"
+                            )
+                            time.sleep(wait)
+                        else:
+                            print(f"  Batch commit FAILED after {COMMIT_MAX_RETRIES} retries: {exc}")
+                    else:
+                        print(f"  Batch commit FAILED: {exc}")
+                        break  # Non-rate-limit errors are not retried
+
+            if not committed:
                 # Commit failure marks all shards in batch as failed
-                print(f"  Batch commit FAILED: {exc}")
+                failed += len(batch_results)  # Count each shard as failed
+                consecutive_failures += 1
                 for r in batch_results:
                     if r["status"] == "ok":
                         r["status"] = "error"
-                        r["error"] = f"commit failed: {exc}"
+                        r["error"] = "commit failed: rate limited"
                         succeeded -= 1
-                        failed += 1
-                        consecutive_failures += 1
 
         results.extend(batch_results)
 
@@ -423,9 +450,8 @@ def sync_shards(
             )
             break
 
-        # Rate limit: wait between batches to stay under 128 commits/hour
-        # With batch_size=25 and ~30 shards/min, we do ~1 commit/min → 60/hr
-        # Still leave margin. No explicit sleep needed at this batch size.
+        # Rate limit margin: with batch_size=50 and ~30 shards/min,
+        # we do ~1 commit every 2min → 30/hr, well under the 128/hr limit.
 
     # Write results file for CI artifact
     results_path = Path("sync_results.jsonl")
