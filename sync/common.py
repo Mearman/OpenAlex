@@ -1,0 +1,407 @@
+"""Shared infrastructure for OpenAlex snapshot data management.
+
+Self-contained — no imports from the thesis experiments pipeline.
+"""
+
+from __future__ import annotations
+
+import gzip
+import json
+import logging
+import os
+import re
+import shutil
+import struct
+import sys
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+# ── Paths ────────────────────────────────────────────────────────────────
+
+# The data root is the openalex-snapshot/ directory (sibling of sync/)
+# sync/ lives in the parent GitHub repo; openalex-snapshot/ is the HF dataset
+SYNC_ROOT = Path(__file__).resolve().parent.parent / "openalex-snapshot"
+DATA_DIR = SYNC_ROOT / "data"
+
+# Override via env vars for non-standard layouts (Falcon, CI, etc.)
+SNAPSHOT_DIR = Path(
+    os.environ.get("OPENALEX_SNAPSHOT", str(DATA_DIR))
+)
+
+# Staging directory for parquet writes — fast local storage (SSD/NVMe).
+# Completed files are moved to the output dir on close.
+STAGING_DIR = (
+    Path(os.environ.get("OPENALEX_STAGING", ""))
+    if os.environ.get("OPENALEX_STAGING")
+    else None
+)
+
+# ── I/O acceleration: orjson > json fallback ─────────────────────────────
+
+try:
+    import orjson
+    _json_loads = orjson.loads
+except ImportError:
+    _json_loads = json.loads
+
+try:
+    from isal import igzip
+
+    def _gzip_open_isal(path, mode="rb", **kwargs):
+        if "compresslevel" in kwargs and kwargs["compresslevel"] > 3:
+            kwargs["compresslevel"] = 3
+        return igzip.open(path, mode, **kwargs)
+
+    _gzip_open: Callable[..., Any] = _gzip_open_isal
+except ImportError:
+    _gzip_open = gzip.open
+
+# ── Entity types ─────────────────────────────────────────────────────────
+
+ENTITY_TYPES = [
+    "works",
+    "authors",
+    "institutions",
+    "sources",
+    "topics",
+    "subfields",
+    "fields",
+    "domains",
+    "publishers",
+    "funders",
+    "concepts",
+]
+
+ENTITY_PREFIX_MAP: dict[str, str] = {
+    "works": "W",
+    "authors": "A",
+    "sources": "S",
+    "institutions": "I",
+    "concepts": "C",
+    "topics": "T",
+    "publishers": "P",
+    "funders": "F",
+    "domains": "Do",
+    "fields": "Fi",
+    "subfields": "Sf",
+}
+
+ENTITY_TYPE_IDS = {name: i for i, name in enumerate(ENTITY_TYPES)}
+
+# Build order: smallest entities first for faster incremental progress.
+ENTITY_TYPES_BUILD_ORDER = [
+    "domains",
+    "fields",
+    "subfields",
+    "topics",
+    "publishers",
+    "funders",
+    "awards",
+    "concepts",
+    "institutions",
+    "sources",
+    "authors",
+    "works",
+]
+
+# ── Edge mappings ────────────────────────────────────────────────────────
+
+EDGE_TYPE_MAPPING: dict[str, tuple[str, str]] = {
+    "work-authors":         ("works", "authors"),
+    "author-works":         ("authors", "works"),
+    "citations":            ("works", "works"),
+    "cited-by":             ("works", "works"),
+    "related-works":        ("works", "works"),
+    "work-institutions":    ("works", "institutions"),
+    "institution-works":    ("institutions", "works"),
+    "work-topics":          ("works", "topics"),
+    "topic-works":          ("topics", "works"),
+    "work-concepts":        ("works", "concepts"),
+    "concept-works":        ("concepts", "works"),
+    "work-sources":         ("works", "sources"),
+    "source-works":         ("sources", "works"),
+    "work-funders":         ("works", "funders"),
+    "funder-works":         ("funders", "works"),
+    "author-institutions":  ("authors", "institutions"),
+    "institution-authors":  ("institutions", "authors"),
+    "author-topics":        ("authors", "topics"),
+    "topic-authors":        ("topics", "authors"),
+    "institution-associated": ("institutions", "institutions"),
+    "institution-topics":   ("institutions", "topics"),
+    "source-publishers":    ("sources", "publishers"),
+    "publisher-sources":    ("publishers", "sources"),
+    "source-topics":        ("sources", "topics"),
+    "topic-subfields":      ("topics", "subfields"),
+    "subfield-topics":      ("subfields", "topics"),
+    "topic-fields":         ("topics", "fields"),
+    "field-topics":         ("fields", "topics"),
+    "topic-domains":        ("topics", "domains"),
+    "domain-topics":        ("domains", "topics"),
+    "subfield-fields":      ("subfields", "fields"),
+    "field-subfields":      ("fields", "subfields"),
+    "subfield-domains":     ("subfields", "domains"),
+    "domain-subfields":     ("domains", "subfields"),
+    "field-domains":        ("fields", "domains"),
+    "domain-fields":        ("domains", "fields"),
+    "publisher-parent":     ("publishers", "publishers"),
+}
+
+EDGE_TO_TABLE: dict[str, str | None] = {
+    "work-authors":             "work_authorships",
+    "author-works":             "work_authorships",
+    "citations":                "work_references",
+    "cited-by":                 "work_references",
+    "related-works":            "work_related",
+    "work-institutions":        "work_corresponding_institutions",
+    "institution-works":        "work_corresponding_institutions",
+    "work-topics":              "work_topics",
+    "topic-works":              "work_topics",
+    "work-concepts":            "work_concepts",
+    "concept-works":            "work_concepts",
+    "work-sources":             None,
+    "source-works":             None,
+    "work-funders":             "work_funders",
+    "funder-works":             "work_funders",
+    "author-institutions":      "author_institutions",
+    "institution-authors":      "author_institutions",
+    "author-topics":            "author_topics",
+    "topic-authors":            "author_topics",
+    "institution-associated":   "institution_associations",
+    "institution-topics":       "institution_topics",
+    "source-publishers":        "source_host_lineage",
+    "publisher-sources":        "source_host_lineage",
+    "source-topics":            "source_topics",
+    "topic-subfields":          "topic_subfields",
+    "subfield-topics":          "topic_subfields",
+    "topic-fields":             "topic_fields",
+    "field-topics":             "topic_fields",
+    "topic-domains":            "topic_domains",
+    "domain-topics":            "topic_domains",
+    "subfield-fields":          "subfield_fields",
+    "field-subfields":          "subfield_fields",
+    "subfield-domains":         "subfield_domains",
+    "domain-subfields":         "subfield_domains",
+    "field-domains":            "field_domains",
+    "domain-fields":            "field_domains",
+    "publisher-parent":         "publisher_lineage",
+}
+
+# ── Nested parquet path mapping ─────────────────────────────────────────
+
+# Singular entity name → plural directory name.
+# New entities added by OpenAlex (e.g. "awards") only need an entry here;
+# all relationship types are then auto-derived from the naming convention
+#   {singular}_{subtable} → {plural}/{subtable}
+#   {singular}-{subtable} → {plural}/{subtable}   (hyphenated variant)
+_ENTITY_SINGULAR_TO_PLURAL: dict[str, str] = {
+    "work": "works",
+    "author": "authors",
+    "institution": "institutions",
+    "source": "sources",
+    "concept": "concepts",
+    "topic": "topics",
+    "field": "fields",
+    "subfield": "subfields",
+    "domain": "domains",
+    "publisher": "publishers",
+    "funder": "funders",
+    "award": "awards",
+    "sdg": "sdgs",
+    "continent": "continents",
+    "country": "countries",
+}
+
+
+def nested_rt_path(rt: str) -> str:
+    """Map a flat relationship type name to its nested entity/subtable path.
+
+    Convention: ``{entity_singular}_{subtable}`` → ``{entity_plural}/{subtable}``.
+    Also handles hyphenated variants (``work-types`` → ``works/types``).
+    Returns the raw ``rt`` unchanged if no known entity prefix is found.
+    """
+    # Try underscore separator first (most common), then hyphen.
+    for sep in ("_", "-"):
+        idx = rt.find(sep)
+        if idx > 0:
+            prefix = rt[:idx]
+            if prefix in _ENTITY_SINGULAR_TO_PLURAL:
+                return f"{_ENTITY_SINGULAR_TO_PLURAL[prefix]}/{rt[idx + 1:]}"
+    return rt
+
+
+def rt_dir(base: Path, rt: str) -> Path:
+    """Construct the output directory for a relationship type."""
+    return base / nested_rt_path(rt)
+
+
+# ── Logging ──────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger("openalex-sync")
+
+# ── Skipped-file tracking ────────────────────────────────────────────────
+
+_skipped_missing_files: list[str] = []
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def extract_id(value: str | int | None) -> int | None:
+    """Strip OpenAlex URL to bare integer."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return value
+    part = value.rsplit("/", 1)[-1]
+    if part and part[0].isalpha():
+        part = part[1:]
+    if part.isdigit():
+        return int(part)
+    return None
+
+
+def format_size(nbytes: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if nbytes < 1024:
+            return f"{nbytes:.1f} {unit}"
+        nbytes /= 1024
+    return f"{nbytes:.1f} PB"
+
+
+def iter_source_files(entity_type: str) -> list[Path]:
+    """List source files for an entity type from SNAPSHOT_DIR."""
+    entity_dir = SNAPSHOT_DIR / entity_type
+    if not entity_dir.is_dir():
+        log.warning("Source directory not found: %s", entity_dir)
+        return []
+    return sorted(f for f in entity_dir.rglob("*.jsonl.gz") if not f.name.startswith("._"))
+
+
+def _entity_from_path(path: Path) -> str | None:
+    """Derive entity type from a snapshot file path."""
+    try:
+        rel = path.relative_to(SNAPSHOT_DIR)
+    except ValueError:
+        return None
+    parts = rel.parts
+    return parts[0] if len(parts) >= 2 else None
+
+
+def _file_in_manifest(entity: str, filename: str, partition_dir: str) -> bool:
+    """Check whether a file appears in the local entity manifest."""
+    manifest_path = SNAPSHOT_DIR / entity / "manifest"
+    if not manifest_path.exists():
+        return True
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return True
+    expected_suffix = f"{entity}/{partition_dir}/{filename}"
+    for entry in manifest.get("entries", []):
+        url: str = entry.get("url", "")
+        if url.endswith(expected_suffix):
+            return True
+    return False
+
+
+def _redownload_corrupt(path: Path) -> None:
+    """Redownload a corrupt file from OpenAlex S3."""
+    from sync.download import S3_BUCKET, _get_s3_client
+
+    try:
+        rel = path.relative_to(SNAPSHOT_DIR)
+    except ValueError:
+        raise FileNotFoundError(f"Not under SNAPSHOT_DIR: {path}")
+
+    s3_key = f"data/{rel}"
+    log.info("Redownloading corrupt file from s3://%s/%s", S3_BUCKET, s3_key)
+    try:
+        from botocore.exceptions import ClientError
+        s3 = _get_s3_client()
+        path.unlink(missing_ok=True)
+        s3.download_file(S3_BUCKET, s3_key, str(path))
+        log.info("Redownloaded %s (%d bytes)", path.name, path.stat().st_size)
+    except Exception as exc:
+        error_str = str(exc)
+        if "404" in error_str:
+            entity = _entity_from_path(path)
+            if entity:
+                try:
+                    rel2 = path.relative_to(SNAPSHOT_DIR / entity)
+                    partition_dir = rel2.parts[0]
+                except (ValueError, IndexError):
+                    partition_dir = ""
+                in_manifest = _file_in_manifest(entity, path.name, partition_dir)
+                if not in_manifest:
+                    log.warning("File %s not on S3 and absent from %s manifest — stale, skipping", path.name, entity)
+                else:
+                    log.warning("File %s IS in %s manifest but S3 returned 404", path.name, entity)
+            raise FileNotFoundError(f"Not found on S3: {path.name}") from exc
+        raise
+
+
+def iter_jsonl(path: Path) -> Iterator[dict]:
+    """Stream JSON objects from a .gz or .jsonl file.
+
+    On EOFError (truncated gzip), redownloads and retries once.
+    """
+    opener = _gzip_open if path.name.endswith(".jsonl.gz") or path.suffix == ".gz" else open
+    try:
+        with opener(path, "rb") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        yield _json_loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+    except EOFError:
+        log.warning("Truncated gzip file: %s — attempting redownload", path.name)
+        try:
+            _redownload_corrupt(path)
+            with opener(path, "rb") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            yield _json_loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+        except FileNotFoundError:
+            try:
+                rel = str(path.relative_to(SNAPSHOT_DIR))
+            except ValueError:
+                rel = str(path)
+            _skipped_missing_files.append(rel)
+            log.warning("Skipping missing file: %s (total skipped: %d)", path.name, len(_skipped_missing_files))
+
+
+def get_skipped_missing_files() -> list[str]:
+    return list(_skipped_missing_files)
+
+
+def reset_skipped_files() -> None:
+    _skipped_missing_files.clear()
+
+
+def create_output_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _relative_source_path(path: Path) -> str:
+    """Return a stable relative path string for progress tracking."""
+    try:
+        rel = str(path.relative_to(SNAPSHOT_DIR))
+    except ValueError:
+        rel = str(path)
+    if rel.endswith(".jsonl.gz"):
+        rel = rel[:-8] + ".gz"
+    elif rel.endswith(".jsonl"):
+        rel = rel[:-6] + ".gz"
+    return rel

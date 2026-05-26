@@ -1,0 +1,42 @@
+# Data — tracked in the HuggingFace openalex-snapshot repo
+openalex-snapshot/
+
+# Legacy scripts and docs
+*.sh
+docs/
+CLAUDE.md
+AGENTS.md
+
+# Built indices
+index/
+archive/
+parquet/
+lsm/
+
+# Embeddings
+openalex-embeddings/
+
+# Snapshot manager
+openalex-snapshot-manager/
+
+# Images
+*.png
+*.svg
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+._*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
