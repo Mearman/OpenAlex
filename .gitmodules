@@ -1,0 +1,3 @@
+[submodule "openalex-snapshot"]
+	path = openalex-snapshot
+	url = https://huggingface.co/datasets/Mearman/OpenAlex

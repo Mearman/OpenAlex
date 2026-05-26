@@ -1,6 +1,3 @@
-# Data — tracked in the HuggingFace openalex-snapshot repo
-openalex-snapshot/
-
 # Legacy scripts and docs
 *.sh
 docs/
