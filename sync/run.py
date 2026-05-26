@@ -4,7 +4,7 @@
 Usage:
     python -m sync sync [--entity ENTITY] [--workers N]
     python -m sync extract [--entity ENTITY] [--workers N]
-    python -m sync upload [--batch-size N] [--max-retries N]
+    python -m sync upload [--batch-size N] [--max-retries N] [--repo-id REPO]
     python -m sync commit [--message MSG]
     python -m sync push
     python -m sync full [--entity ENTITY] [--workers N]
@@ -25,10 +25,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from sync.common import SYNC_ROOT
+
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", "-C", str(REPO_ROOT)] + list(args),
+        ["git", "-C", str(SYNC_ROOT)] + list(args),
         capture_output=True, text=True, check=check,
     )
 
@@ -97,75 +99,73 @@ def cmd_push(args) -> None:
     _git("push", check=False)
 
 
-def cmd_upload(args) -> None:
-    """Upload untracked parquet files to HuggingFace in size-sorted batches."""
-    import subprocess
-
-    batch_size = args.batch_size
-    max_retries = args.max_retries
-
-    # Find all parquet files on disk
-    all_parquets = set()
+def _find_untracked_parquets() -> list[tuple[int, str]]:
+    """Return untracked parquet files sorted by size (smallest first)."""
+    all_parquets: set[str] = set()
     for p in SYNC_ROOT.rglob("*.parquet"):
         if not p.name.startswith("._"):
             all_parquets.add(str(p.relative_to(SYNC_ROOT)))
 
-    # Find already-tracked parquet files
     r = _git("ls-files")
     tracked = {f for f in r.stdout.strip().split("\n") if f.endswith(".parquet")}
 
     untracked = all_parquets - tracked
     if not untracked:
-        log("All parquet files already tracked")
-        return
+        return []
 
-    # Sort by file size (smallest first)
-    untracked_with_size = []
+    with_size: list[tuple[int, str]] = []
     for rel in untracked:
         full = SYNC_ROOT / rel
         try:
             sz = full.stat().st_size
         except OSError:
             sz = 0
-        untracked_with_size.append((sz, rel))
-    untracked_with_size.sort()
+        with_size.append((sz, rel))
+    with_size.sort()
+    return with_size
 
-    total = len(untracked_with_size)
-    log(f"{total} untracked parquet files, sorted smallest-first")
 
-    batch_num = 0
-    for i in range(0, total, batch_size):
-        chunk = untracked_with_size[i:i + batch_size]
-        batch_num += 1
-        paths = [rel for _, rel in chunk]
+def _sync_git_refs() -> None:
+    """Fetch remote and reset local index to match (leaves working tree intact)."""
+    log("Fetching remote...")
+    _git("fetch", "origin")
+    # --mixed updates the index to match origin/main's tree without
+    # touching the working tree. LFS clean filter means git compares
+    # the working tree files (through the pointer) against the index
+    # and sees them as matching.
+    _git("reset", "--mixed", "origin/main")
+    log("Git refs synced")
 
-        # Stage
-        _git("add", "--", *paths)
 
-        # Commit
-        n = len(chunk)
-        _git(
-            "-c", "diff.renames=false",
-            "commit", "-m",
-            f"feat: add parquet shards batch {batch_num} ({n} files, smallest-first)",
-        )
+def cmd_upload(args) -> None:
+    """Upload untracked parquet files to HuggingFace via the REST API."""
+    from huggingface_hub import HfApi, upload_large_folder
 
-        # Push with retry
-        pushed = False
-        for attempt in range(1, max_retries + 1):
-            r = _git("push", check=False)
-            if r.returncode == 0:
-                pushed = True
-                break
-            log(f"  push attempt {attempt} failed, retrying in 30s...")
-            time.sleep(30)
+    repo_id = args.repo_id
+    num_workers = args.workers
 
-        if not pushed:
-            log(f"  batch {batch_num} failed after {max_retries} attempts — aborting")
-            sys.exit(1)
+    # Find which parquet files are untracked locally (for reporting)
+    untracked = _find_untracked_parquets()
+    if not untracked:
+        log("All parquet files already tracked locally")
+        return
 
-        log(f"  batch {batch_num} ({min(i + n, total)}/{total}) pushed {time.strftime('%H:%M:%S')}")
+    total = len(untracked)
+    log(f"{total} untracked parquet files, uploading via HF API with {num_workers} workers")
 
+    # upload_large_folder handles hashing, pre-upload, committing, and
+    # resumption automatically. It uploads ONLY files not already on the
+    # server, so re-running after an interruption is safe.
+    upload_large_folder(
+        repo_id=repo_id,
+        folder_path=str(SYNC_ROOT),
+        repo_type="dataset",
+        allow_patterns=["*.parquet"],
+        num_workers=num_workers,
+    )
+
+    # Bring local git refs in line with what the server now has
+    _sync_git_refs()
     log("ALL DONE")
 
 
@@ -210,9 +210,9 @@ def main():
     subparsers.add_parser("push", help="Git push")
 
     # upload
-    p_upload = subparsers.add_parser("upload", help="Upload untracked parquet to HF in size-sorted batches")
-    p_upload.add_argument("--batch-size", type=int, default=50, help="Files per commit (default: 50)")
-    p_upload.add_argument("--max-retries", type=int, default=3, help="Push retries per batch (default: 3)")
+    p_upload = subparsers.add_parser("upload", help="Upload untracked parquet to HF via REST API")
+    p_upload.add_argument("--workers", type=int, default=8, help="Parallel upload workers (default: 8)")
+    p_upload.add_argument("--repo-id", type=str, default="Mearman/OpenAlex", help="HF dataset repo ID")
 
     # full
     p_full = subparsers.add_parser("full", help="sync → extract → commit → push")

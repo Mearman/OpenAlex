@@ -2,3 +2,4 @@ boto3
 pyarrow
 orjson
 isal
+huggingface_hub
