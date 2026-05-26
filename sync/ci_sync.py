@@ -196,52 +196,40 @@ def _extract_shard(source_path: Path, entity: str, output_dir: Path) -> list[Pat
         return result
 
 
-def _process_shard(entity: str, s3_key: str) -> int:
-    """Download, extract, and upload a single shard. Returns file count uploaded."""
-    from huggingface_hub import HfApi, CommitOperationAdd
+def _prepare_shard(entity: str, s3_key: str, staging_dir: Path) -> list:
+    """Download and extract a shard into staging. Returns CommitOperationAdd list."""
+    from huggingface_hub import CommitOperationAdd
 
     hf_path = _s3_key_to_hf_path(s3_key)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
+    # Download
+    local_gz = staging_dir / Path(s3_key).name
+    _download_shard(s3_key, local_gz)
 
-        # Download
-        local_gz = tmp_dir / Path(s3_key).name
-        _download_shard(s3_key, local_gz)
+    # Rename to .jsonl.gz
+    jsonl_gz = staging_dir / (local_gz.stem + ".jsonl.gz")
+    shutil.move(str(local_gz), str(jsonl_gz))
 
-        # Rename to .jsonl.gz
-        jsonl_gz = tmp_dir / (local_gz.stem + ".jsonl.gz")
-        shutil.move(str(local_gz), str(jsonl_gz))
+    # Extract to parquet
+    parquet_files = _extract_shard(jsonl_gz, entity, staging_dir / "parquet")
 
-        # Extract to parquet
-        parquet_files = _extract_shard(jsonl_gz, entity, tmp_dir / "parquet")
-
-        # Build upload operations
-        operations = [
+    # Build upload operations — files must exist on disk until the commit is made
+    operations = [
+        CommitOperationAdd(
+            path_in_repo=hf_path,
+            path_or_fileobj=str(jsonl_gz),
+        )
+    ]
+    for pq in parquet_files:
+        pq_rel = pq.relative_to(staging_dir / "parquet")
+        operations.append(
             CommitOperationAdd(
-                path_in_repo=hf_path,
-                path_or_fileobj=str(jsonl_gz),
+                path_in_repo=f"data/{pq_rel}",
+                path_or_fileobj=str(pq),
             )
-        ]
-        for pq in parquet_files:
-            pq_rel = pq.relative_to(tmp_dir / "parquet")
-            operations.append(
-                CommitOperationAdd(
-                    path_in_repo=f"data/{pq_rel}",
-                    path_or_fileobj=str(pq),
-                )
-            )
-
-        # Upload
-        api = HfApi()
-        api.create_commit(
-            repo_id=HF_REPO_ID,
-            repo_type="dataset",
-            operations=operations,
-            commit_message=f"feat: sync {hf_path}",
         )
 
-        return len(operations)
+    return operations
 
 
 # ── Detection ────────────────────────────────────────────────────────────
@@ -301,19 +289,30 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
 SyncResult = dict  # {"entity": str, "s3_key": str, "status": str, "files": int, "error": str|None, "seconds": float}
 
 
+# HF free-tier rate limit: 128 commits per hour. Stay well under with batches.
+COMMIT_BATCH_SIZE = 25
+
+
 def sync_shards(
     new_shards: dict[str, list[str]] | None = None,
     entity_filter: str | None = None,
 ) -> None:
     """Download, extract, and upload new shards to HuggingFace.
 
-    Processes one shard at a time to keep disk usage bounded.
-    Isolates failures per shard — a bad shard does not stop the rest.
-    Retries failed shards up to 3 times with exponential backoff.
+    Batches multiple shards into a single commit to stay under the HF
+    rate limit (128 commits/hour on the free tier). Within each batch,
+    shards are downloaded and extracted one at a time to keep disk bounded.
+    All files from the batch are committed together, then the staging
+    directory is cleaned up.
+
+    Isolates failures per shard — a bad shard is skipped, not retried
+    within the batch. Failed shards are logged for the next run.
     Aborts after MAX_CONSECUTIVE_FAILURES consecutive unrecoverable failures.
 
     Writes a sync_results.jsonl file with per-shard outcomes.
     """
+    from huggingface_hub import HfApi
+
     if new_shards is None:
         new_shards = detect_new_shards(entity_filter=entity_filter)
 
@@ -321,17 +320,30 @@ def sync_shards(
         print("No new shards to sync")
         return
 
-    total = sum(len(v) for v in new_shards.values())
-    print(f"Syncing {total} new shards across {len(new_shards)} entities")
+    # Flatten to ordered list of (entity, s3_key) pairs
+    queue: list[tuple[str, str]] = []
+    for entity in ENTITY_TYPES_BUILD_ORDER:
+        if entity in new_shards:
+            for s3_key in new_shards[entity]:
+                queue.append((entity, s3_key))
 
+    total = len(queue)
+    print(f"Syncing {total} new shards in batches of {COMMIT_BATCH_SIZE}")
+
+    api = HfApi()
     results: list[SyncResult] = []
-    processed = 0
     succeeded = 0
     failed = 0
     consecutive_failures = 0
+    processed = 0
 
-    for entity, s3_keys in new_shards.items():
-        for s3_key in s3_keys:
+    for batch_start in range(0, total, COMMIT_BATCH_SIZE):
+        batch = queue[batch_start:batch_start + COMMIT_BATCH_SIZE]
+        batch_ops: list = []  # Accumulated CommitOperationAdd
+        batch_staging_dirs: list[Path] = []
+        batch_results: list[SyncResult] = []
+
+        for entity, s3_key in batch:
             processed += 1
             result: SyncResult = {
                 "entity": entity,
@@ -342,59 +354,78 @@ def sync_shards(
                 "seconds": 0.0,
             }
 
-            # Retry up to 3 times with exponential backoff
-            max_retries = 3
-            for attempt in range(max_retries):
-                t0 = time.monotonic()
-                try:
-                    file_count = _process_shard(entity, s3_key)
-                    elapsed = time.monotonic() - t0
+            t0 = time.monotonic()
+            try:
+                # Each shard gets its own temp dir — cleaned up after commit
+                staging = Path(tempfile.mkdtemp(prefix="openalex-sync-"))
+                ops = _prepare_shard(entity, s3_key, staging)
 
-                    result["status"] = "ok"
-                    result["files"] = file_count
-                    result["seconds"] = round(elapsed, 1)
-                    succeeded += 1
-                    consecutive_failures = 0
+                elapsed = time.monotonic() - t0
+                result["status"] = "ok"
+                result["files"] = len(ops)
+                result["seconds"] = round(elapsed, 1)
+                succeeded += 1
+                consecutive_failures = 0
 
-                    print(
-                        f"  [{processed}/{total}] OK {s3_key} "
-                        f"({file_count} files, {elapsed:.0f}s)"
-                    )
-                    break
+                batch_ops.extend(ops)
+                batch_staging_dirs.append(staging)
+                batch_results.append(result)
 
-                except Exception as exc:
-                    elapsed = time.monotonic() - t0
-                    result["error"] = str(exc)
-                    result["seconds"] = round(elapsed, 1)
+                print(
+                    f"  [{processed}/{total}] prepared {s3_key} "
+                    f"({len(ops)} files, {elapsed:.0f}s)"
+                )
 
-                    if attempt < max_retries - 1:
-                        wait = 2 ** attempt  # 1s, 2s
-                        print(
-                            f"  [{processed}/{total}] RETRY {s3_key} "
-                            f"(attempt {attempt + 1}/{max_retries}, "
-                            f"waiting {wait}s): {exc}"
-                        )
-                        time.sleep(wait)
-                    else:
-                        result["status"] = "error"
+            except Exception as exc:
+                elapsed = time.monotonic() - t0
+                result["status"] = "error"
+                result["error"] = str(exc)
+                result["seconds"] = round(elapsed, 1)
+                failed += 1
+                consecutive_failures += 1
+                batch_results.append(result)
+
+                print(
+                    f"  [{processed}/{total}] FAILED {s3_key}: {exc}"
+                )
+
+        # Commit the batch
+        if batch_ops:
+            try:
+                api.create_commit(
+                    repo_id=HF_REPO_ID,
+                    repo_type="dataset",
+                    operations=batch_ops,
+                    commit_message=f"feat: sync {len(batch_ops)} files from {len(batch)} shards",
+                )
+                print(f"  Committed batch of {len(batch_ops)} files")
+            except Exception as exc:
+                # Commit failure marks all shards in batch as failed
+                print(f"  Batch commit FAILED: {exc}")
+                for r in batch_results:
+                    if r["status"] == "ok":
+                        r["status"] = "error"
+                        r["error"] = f"commit failed: {exc}"
+                        succeeded -= 1
                         failed += 1
                         consecutive_failures += 1
-                        print(
-                            f"  [{processed}/{total}] FAILED {s3_key} "
-                            f"after {max_retries} attempts: {exc}"
-                        )
 
-            results.append(result)
+        results.extend(batch_results)
 
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                print(
-                    f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive "
-                    f"unrecoverable failures"
-                )
-                break
+        # Clean up staging dirs — files are now on the server
+        for staging in batch_staging_dirs:
+            shutil.rmtree(staging, ignore_errors=True)
 
         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            print(
+                f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive "
+                f"unrecoverable failures"
+            )
             break
+
+        # Rate limit: wait between batches to stay under 128 commits/hour
+        # With batch_size=25 and ~30 shards/min, we do ~1 commit/min → 60/hr
+        # Still leave margin. No explicit sleep needed at this batch size.
 
     # Write results file for CI artifact
     results_path = Path("sync_results.jsonl")
@@ -404,7 +435,6 @@ def sync_shards(
 
     print(f"Done: {succeeded} succeeded, {failed} failed out of {total}")
     if failed > 0:
-        # Non-zero exit so CI marks the run as failed
         sys.exit(1)
 
 
