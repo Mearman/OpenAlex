@@ -19,14 +19,88 @@ from typing import Any, Callable, Iterator
 # ── Paths ────────────────────────────────────────────────────────────────
 
 # The data root is the openalex-snapshot/ directory (sibling of sync/)
-# sync/ lives in the parent GitHub repo; openalex-snapshot/ is the HF dataset
-SYNC_ROOT = Path(__file__).resolve().parent.parent / "openalex-snapshot"
-DATA_DIR = SYNC_ROOT / "data"
+# sync/ lives in the parent GitHub repo; openalex-snapshot/ is the HF dataset.
+# Lazy resolution: these compute on first attribute access so that importing
+# sync.common on CI (where openalex-snapshot/ doesn't exist) doesn't fail.
+# CI code overrides SNAPSHOT_DIR before use (via env var or direct assignment).
 
-# Override via env vars for non-standard layouts (Falcon, CI, etc.)
-SNAPSHOT_DIR = Path(
-    os.environ.get("OPENALEX_SNAPSHOT", str(DATA_DIR))
-)
+
+def _resolve_sync_root() -> Path:
+    """Lazily resolve SYNC_ROOT. Overridable via OPENALEX_SYNC_ROOT env var."""
+    env = os.environ.get("OPENALEX_SYNC_ROOT")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parent.parent / "openalex-snapshot"
+
+
+def _resolve_snapshot_dir() -> Path:
+    """Lazily resolve SNAPSHOT_DIR. Overridable via OPENALEX_SNAPSHOT env var."""
+    env = os.environ.get("OPENALEX_SNAPSHOT")
+    if env:
+        return Path(env)
+    return _resolve_sync_root() / "data"
+
+
+class _LazyPath:
+    """Descriptor that resolves a path on first access, then caches it."""
+
+    def __init__(self, resolver):
+        self._resolver = resolver
+        self._attr_name = None
+
+    def __set_name__(self, owner, name):
+        self._attr_name = f"_lazy_{name}"
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        cached = getattr(obj, self._attr_name, self)
+        if cached is self:
+            cached = self._resolver()
+            object.__setattr__(obj, self._attr_name, cached)
+        return cached
+
+    def __set__(self, obj, value):
+        object.__setattr__(obj, self._attr_name, value)
+
+
+class _Paths:
+    """Module-level lazy path container.
+
+    SYNC_ROOT and SNAPSHOT_DIR resolve on first access.
+    Assigning to them (e.g. ``common.SNAPSHOT_DIR = tmp_dir``) overrides
+    the lazy resolution permanently.
+    """
+
+    SYNC_ROOT: Path = _LazyPath(_resolve_sync_root)       # type: ignore[assignment]
+    SNAPSHOT_DIR: Path = _LazyPath(_resolve_snapshot_dir)  # type: ignore[assignment]
+
+    @property
+    def DATA_DIR(self) -> Path:
+        return self.SYNC_ROOT / "data"
+
+
+# Module-level singleton. Importing sync.common does not trigger resolution.
+_paths = _Paths()
+
+
+def __getattr__(name):
+    """Expose _Paths attributes at module level for backward compatibility."""
+    if name in ("SYNC_ROOT", "DATA_DIR", "SNAPSHOT_DIR"):
+        return getattr(_paths, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __setattr__(name, value):
+    """Allow ``common.SNAPSHOT_DIR = ...`` to override lazy resolution."""
+    if name in ("SYNC_ROOT", "SNAPSHOT_DIR"):
+        setattr(_paths, name, value)
+    else:
+        globals()[name] = value
+
+
+def __delattr__(name):
+    raise AttributeError(f"cannot delete {name!r} from {__name__!r}")
 
 # Staging directory for parquet writes — fast local storage (SSD/NVMe).
 # Completed files are moved to the output dir on close.

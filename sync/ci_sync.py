@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Detect and sync new OpenAlex snapshot shards from S3 to HuggingFace.
 
-Compares S3 manifests against the current HF dataset to find new shards,
-then downloads, renames, extracts to parquet, and uploads each one.
+Compares S3 manifests (or S3 directory listings for manifest-less entities)
+against the current HF dataset to find new shards, then downloads, renames,
+extracts to parquet, and uploads each one.
 
-Designed for CI: processes one shard at a time to keep disk bounded.
+Designed for CI: processes one shard at a time to keep disk bounded, with
+per-shard error isolation, retries, timeouts, and structured result logging.
 """
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 import boto3
@@ -21,6 +26,18 @@ from sync.common import ENTITY_TYPES_BUILD_ORDER
 
 S3_BUCKET = "openalex"
 HF_REPO_ID = "Mearman/OpenAlex"
+
+# Per-shard timeout in seconds. Works shards can be large (~700MB compressed)
+# so extraction may take a while. 10 minutes is generous.
+SHARD_TIMEOUT = 600
+
+# Maximum consecutive failures before aborting the sync run.
+MAX_CONSECUTIVE_FAILURES = 5
+
+log = logging.getLogger("openalex-sync")
+
+
+# ── S3 helpers ───────────────────────────────────────────────────────────
 
 
 def _s3_client():
@@ -38,22 +55,42 @@ def _fetch_manifest(entity: str) -> dict[str, dict]:
     entries = {}
     for entry in manifest.get("entries", []):
         url: str = entry.get("url", "")
-        # s3://openalex/data/works/updated_date=.../part_0000.gz
         if url.startswith(f"s3://{S3_BUCKET}/"):
             key = url[len(f"s3://{S3_BUCKET}/"):]
             entries[key] = entry.get("meta", {})
     return entries
 
 
+def _list_s3_shards(entity: str) -> dict[str, dict]:
+    """List .gz files on S3 for a manifest-less entity.
+
+    Used as a fallback for entities without manifests (e.g. awards).
+    Returns {s3_key: {}} with empty meta since we have no metadata.
+    """
+    s3 = _s3_client()
+    prefix = f"data/{entity}/"
+    entries: dict[str, dict] = {}
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key: str = obj["Key"]
+            if key.endswith(".gz") and not key.endswith(".jsonl.gz"):
+                entries[key] = {}
+    return entries
+
+
+# ── HF helpers ───────────────────────────────────────────────────────────
+
+
 def _hf_source_files_for_entity(entity: str) -> set[str] | None:
     """List .jsonl.gz files on HuggingFace for a specific entity.
 
-    For large entities (works), uses shallow listing of partition directories
-    then per-partition file enumeration to avoid timeouts on recursive listing
-    of directories with tens of thousands of files.
+    Uses recursive listing first (fast for small entities). Falls back to
+    shallow partition-directory listing + per-partition enumeration for
+    large entities where recursive listing may timeout.
 
-    Returns None if the listing fails, signalling the caller should fall back
-    to per-file checks.
+    Returns None if all listing approaches fail, signalling the caller
+    should fall back to per-file existence checks.
     """
     from huggingface_hub import HfApi
     api = HfApi()
@@ -74,8 +111,6 @@ def _hf_source_files_for_entity(entity: str) -> set[str] | None:
         pass
 
     # Fallback: shallow + per-partition approach for large entities.
-    # 1. List partition directories (non-recursive — fast).
-    # 2. For each partition, list files individually.
     try:
         partition_dirs: set[str] = set()
         for item in api.list_repo_tree(
@@ -102,6 +137,9 @@ def _hf_source_files_for_entity(entity: str) -> set[str] | None:
         return None
 
 
+# ── Path conversion ──────────────────────────────────────────────────────
+
+
 def _s3_key_to_hf_path(s3_key: str) -> str:
     """Convert S3 key to HF path with .jsonl.gz extension.
 
@@ -113,25 +151,7 @@ def _s3_key_to_hf_path(s3_key: str) -> str:
     return s3_key
 
 
-def _parquet_paths_for_source(hf_path: str) -> list[str]:
-    """Derive expected parquet file paths for a source shard.
-
-    Given data/works/updated_date=2024-01-13/part_0000.jsonl.gz,
-    the parquet files are:
-      data/works/{rel_type}/works__updated_date=2024-01-13__part_0000.parquet
-
-    We can't know which rel_types exist without extracting, so we return
-    the pattern prefix for deletion/cleanup purposes.
-    """
-    # data/works/updated_date=2024-01-13/part_0000.jsonl.gz
-    # → entity=works, shard_key=works__updated_date=2024-01-13__part_0000
-    parts = hf_path.split("/")
-    entity = parts[1]
-    filename = parts[-1]  # part_0000.jsonl.gz
-    partition = parts[2]  # updated_date=2024-01-13
-    part_stem = filename.rsplit(".", 2)[0]  # part_0000
-    shard_key = f"{entity}__{partition}__{part_stem}"
-    return shard_key
+# ── Shard operations ────────────────────────────────────────────────────
 
 
 def _download_shard(s3_key: str, dest: Path) -> None:
@@ -145,36 +165,26 @@ def _extract_shard(source_path: Path, entity: str, output_dir: Path) -> list[Pat
     """Extract a single source shard to parquet. Returns list of parquet files."""
     from sync.extract import convert_relationships
 
-    # Extract to a temp dir, then move results
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        # Place the source file in the expected layout
         mock_data = tmp_dir / "data" / entity
         mock_data.mkdir(parents=True)
 
-        # Preserve partition dir structure
         partition_dir = mock_data / source_path.parent.name
         partition_dir.mkdir(exist_ok=True)
         target = partition_dir / source_path.name
 
-        # Copy or symlink the source file
         shutil.copy2(source_path, target)
 
-        # Override SNAPSHOT_DIR temporarily
         import sync.common as common
         original_snapshot = common.SNAPSHOT_DIR
         common.SNAPSHOT_DIR = tmp_dir / "data"
 
         try:
-            counts = convert_relationships(
-                entity,
-                force=True,
-                workers=1,
-            )
+            convert_relationships(entity, force=True, workers=1)
         finally:
             common.SNAPSHOT_DIR = original_snapshot
 
-        # Collect parquet files from the mock data dir
         parquet_files = list((tmp_dir / "data").rglob("*.parquet"))
         result = []
         for pq in parquet_files:
@@ -186,34 +196,93 @@ def _extract_shard(source_path: Path, entity: str, output_dir: Path) -> list[Pat
         return result
 
 
-def detect_new_shards() -> dict[str, list[str]]:
+def _process_shard(entity: str, s3_key: str) -> int:
+    """Download, extract, and upload a single shard. Returns file count uploaded."""
+    from huggingface_hub import HfApi, CommitOperationAdd
+
+    hf_path = _s3_key_to_hf_path(s3_key)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+
+        # Download
+        local_gz = tmp_dir / Path(s3_key).name
+        _download_shard(s3_key, local_gz)
+
+        # Rename to .jsonl.gz
+        jsonl_gz = tmp_dir / (local_gz.stem + ".jsonl.gz")
+        shutil.move(str(local_gz), str(jsonl_gz))
+
+        # Extract to parquet
+        parquet_files = _extract_shard(jsonl_gz, entity, tmp_dir / "parquet")
+
+        # Build upload operations
+        operations = [
+            CommitOperationAdd(
+                path_in_repo=hf_path,
+                path_or_fileobj=str(jsonl_gz),
+            )
+        ]
+        for pq in parquet_files:
+            pq_rel = pq.relative_to(tmp_dir / "parquet")
+            operations.append(
+                CommitOperationAdd(
+                    path_in_repo=f"data/{pq_rel}",
+                    path_or_fileobj=str(pq),
+                )
+            )
+
+        # Upload
+        api = HfApi()
+        api.create_commit(
+            repo_id=HF_REPO_ID,
+            repo_type="dataset",
+            operations=operations,
+            commit_message=f"feat: sync {hf_path}",
+        )
+
+        return len(operations)
+
+
+# ── Detection ────────────────────────────────────────────────────────────
+
+
+def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
     """Compare S3 manifests against HF to find new shards.
+
+    For entities without manifests (e.g. awards), falls back to S3
+    directory listing.
+
+    Args:
+        entity_filter: If set, only detect for this entity. Otherwise all.
 
     Returns {entity: [s3_key, ...]} for each entity with new files.
     """
     from huggingface_hub import HfApi
     api = HfApi()
 
+    entities = (
+        [entity_filter] if entity_filter else ENTITY_TYPES_BUILD_ORDER
+    )
     new_shards: dict[str, list[str]] = {}
 
-    for entity in ENTITY_TYPES_BUILD_ORDER:
+    for entity in entities:
+        # Try manifest first, fall back to S3 directory listing
         manifest = _fetch_manifest(entity)
+        if not manifest:
+            manifest = _list_s3_shards(entity)
         if not manifest:
             continue
 
-        # For small entities, list the directory tree.
-        # For large ones, check individual files.
         hf_files = _hf_source_files_for_entity(entity)
 
         if hf_files is not None:
-            # Tree listing worked
             new_for_entity = []
             for s3_key in manifest:
                 hf_path = _s3_key_to_hf_path(s3_key)
                 if hf_path not in hf_files:
                     new_for_entity.append(s3_key)
         else:
-            # Tree listing failed — check each manifest entry individually
             new_for_entity = []
             for s3_key in manifest:
                 hf_path = _s3_key_to_hf_path(s3_key)
@@ -226,15 +295,27 @@ def detect_new_shards() -> dict[str, list[str]]:
     return new_shards
 
 
-def sync_shards(new_shards: dict[str, list[str]] | None = None) -> None:
+# ── Sync ─────────────────────────────────────────────────────────────────
+
+# SyncResult is written as JSONL at the end of a run for CI artifact upload.
+SyncResult = dict  # {"entity": str, "s3_key": str, "status": str, "files": int, "error": str|None, "seconds": float}
+
+
+def sync_shards(
+    new_shards: dict[str, list[str]] | None = None,
+    entity_filter: str | None = None,
+) -> None:
     """Download, extract, and upload new shards to HuggingFace.
 
     Processes one shard at a time to keep disk usage bounded.
-    """
-    from huggingface_hub import HfApi, CommitOperationAdd
+    Isolates failures per shard — a bad shard does not stop the rest.
+    Retries failed shards up to 3 times with exponential backoff.
+    Aborts after MAX_CONSECUTIVE_FAILURES consecutive unrecoverable failures.
 
+    Writes a sync_results.jsonl file with per-shard outcomes.
+    """
     if new_shards is None:
-        new_shards = detect_new_shards()
+        new_shards = detect_new_shards(entity_filter=entity_filter)
 
     if not new_shards:
         print("No new shards to sync")
@@ -243,71 +324,117 @@ def sync_shards(new_shards: dict[str, list[str]] | None = None) -> None:
     total = sum(len(v) for v in new_shards.values())
     print(f"Syncing {total} new shards across {len(new_shards)} entities")
 
-    api = HfApi()
+    results: list[SyncResult] = []
     processed = 0
+    succeeded = 0
+    failed = 0
+    consecutive_failures = 0
 
     for entity, s3_keys in new_shards.items():
         for s3_key in s3_keys:
             processed += 1
-            hf_path = _s3_key_to_hf_path(s3_key)
-            print(f"  [{processed}/{total}] {s3_key}")
+            result: SyncResult = {
+                "entity": entity,
+                "s3_key": s3_key,
+                "status": "pending",
+                "files": 0,
+                "error": None,
+                "seconds": 0.0,
+            }
 
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_dir = Path(tmp)
+            # Retry up to 3 times with exponential backoff
+            max_retries = 3
+            for attempt in range(max_retries):
+                t0 = time.monotonic()
+                try:
+                    file_count = _process_shard(entity, s3_key)
+                    elapsed = time.monotonic() - t0
 
-                # Download
-                local_gz = tmp_dir / Path(s3_key).name
-                _download_shard(s3_key, local_gz)
+                    result["status"] = "ok"
+                    result["files"] = file_count
+                    result["seconds"] = round(elapsed, 1)
+                    succeeded += 1
+                    consecutive_failures = 0
 
-                # Rename to .jsonl.gz
-                jsonl_gz = tmp_dir / (local_gz.stem + ".jsonl.gz")
-                shutil.move(str(local_gz), str(jsonl_gz))
-
-                # Extract to parquet
-                parquet_files = _extract_shard(jsonl_gz, entity, tmp_dir / "parquet")
-
-                # Build upload operations
-                operations = [
-                    CommitOperationAdd(
-                        path_in_repo=hf_path,
-                        path_or_fileobj=str(jsonl_gz),
+                    print(
+                        f"  [{processed}/{total}] OK {s3_key} "
+                        f"({file_count} files, {elapsed:.0f}s)"
                     )
-                ]
-                for pq in parquet_files:
-                    pq_rel = pq.relative_to(tmp_dir / "parquet")
-                    operations.append(
-                        CommitOperationAdd(
-                            path_in_repo=f"data/{pq_rel}",
-                            path_or_fileobj=str(pq),
+                    break
+
+                except Exception as exc:
+                    elapsed = time.monotonic() - t0
+                    result["error"] = str(exc)
+                    result["seconds"] = round(elapsed, 1)
+
+                    if attempt < max_retries - 1:
+                        wait = 2 ** attempt  # 1s, 2s
+                        print(
+                            f"  [{processed}/{total}] RETRY {s3_key} "
+                            f"(attempt {attempt + 1}/{max_retries}, "
+                            f"waiting {wait}s): {exc}"
                         )
-                    )
+                        time.sleep(wait)
+                    else:
+                        result["status"] = "error"
+                        failed += 1
+                        consecutive_failures += 1
+                        print(
+                            f"  [{processed}/{total}] FAILED {s3_key} "
+                            f"after {max_retries} attempts: {exc}"
+                        )
 
-                # Upload
-                api.create_commit(
-                    repo_id=HF_REPO_ID,
-                    repo_type="dataset",
-                    operations=operations,
-                    commit_message=f"feat: sync {hf_path}",
+            results.append(result)
+
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                print(
+                    f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive "
+                    f"unrecoverable failures"
                 )
+                break
 
-                print(f"    uploaded {len(operations)} files")
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            break
 
-    print(f"Done: synced {processed} shards")
+    # Write results file for CI artifact
+    results_path = Path("sync_results.jsonl")
+    with open(results_path, "w") as f:
+        for r in results:
+            f.write(json.dumps(r) + "\n")
+
+    print(f"Done: {succeeded} succeeded, {failed} failed out of {total}")
+    if failed > 0:
+        # Non-zero exit so CI marks the run as failed
+        sys.exit(1)
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Sync new OpenAlex shards to HuggingFace")
+    parser = argparse.ArgumentParser(
+        description="Sync new OpenAlex shards to HuggingFace"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    detect = sub.add_parser("detect", help="Show new shards without syncing")
-    sync = sub.add_parser("sync", help="Download, extract, and upload new shards")
+    detect_parser = sub.add_parser("detect", help="Show new shards without syncing")
+    detect_parser.add_argument(
+        "--entity", type=str, default=None,
+        help="Only detect for this entity (default: all)",
+    )
+
+    sync_parser = sub.add_parser("sync", help="Download, extract, and upload new shards")
+    sync_parser.add_argument(
+        "--entity", type=str, default=None,
+        help="Only sync this entity (default: all)",
+    )
 
     args = parser.parse_args()
 
     if args.command == "detect":
-        new = detect_new_shards()
+        new = detect_new_shards(entity_filter=args.entity)
         if not new:
             print("No new shards")
         else:
@@ -321,4 +448,4 @@ if __name__ == "__main__":
                     print(f"    ... and {len(keys) - 5} more")
 
     elif args.command == "sync":
-        sync_shards()
+        sync_shards(entity_filter=args.entity)

@@ -13,8 +13,10 @@ on:
 jobs:
   detect:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       has_new: ${{ steps.check.outputs.has_new }}
+      entity: ${{ steps.check.outputs.entity }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,8 +31,12 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          cd $GITHUB_WORKSPACE
-          OUTPUT=$(python3 -m sync.ci_sync detect 2>&1)
+          ENTITY_ARG="${{ github.event.inputs.entity }}"
+          if [ -n "$ENTITY_ARG" ]; then
+            OUTPUT=$(python3 -m sync.ci_sync detect --entity "$ENTITY_ARG" 2>&1)
+          else
+            OUTPUT=$(python3 -m sync.ci_sync detect 2>&1)
+          fi
           echo "$OUTPUT"
 
           if echo "$OUTPUT" | grep -q "No new shards"; then
@@ -38,11 +44,13 @@ jobs:
           else
             echo "has_new=true" >> $GITHUB_OUTPUT
           fi
+          echo "entity=$ENTITY_ARG" >> $GITHUB_OUTPUT
 
   sync:
     needs: detect
     if: needs.detect.outputs.has_new == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # GitHub Actions max; large runs may need this
     steps:
       - uses: actions/checkout@v4
 
@@ -56,10 +64,37 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          cd $GITHUB_WORKSPACE
-          python3 -m sync.ci_sync sync
+          ENTITY_ARG="${{ needs.detect.outputs.entity }}"
+          if [ -n "$ENTITY_ARG" ]; then
+            python3 -m sync.ci_sync sync --entity "$ENTITY_ARG"
+          else
+            python3 -m sync.ci_sync sync
+          fi
 
-      - name: Notify on failure
-        if: failure()
+      - name: Upload sync results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-results
+          path: sync_results.jsonl
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Report outcome
+        if: always()
         run: |
-          echo "::error::OpenAlex sync failed. Check logs for details."
+          if [ -f sync_results.jsonl ]; then
+            echo "## Sync results" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat sync_results.jsonl >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+
+            FAILED=$(grep -c '"status": "error"' sync_results.jsonl || true)
+            OK=$(grep -c '"status": "ok"' sync_results.jsonl || true)
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**${OK} succeeded, ${FAILED} failed**" >> $GITHUB_STEP_SUMMARY
+
+            if [ "$FAILED" -gt 0 ]; then
+              echo "::warning::${FAILED} shards failed to sync"
+            fi
+          fi
