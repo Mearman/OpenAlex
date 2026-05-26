@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this dataset, please cite it as below."
+type: dataset
+authors:
+- family-names: "Mearman"
+  given-names: "Joseph"
+title: "OpenAlex"
+version: f5ffc05
+doi: 10.57967/hf/7682
+date-released: 2026-05-26
+url: "https://huggingface.co/datasets/Mearman/OpenAlex"
+repository: "https://github.com/Mearman/OpenAlex"
+repository-artifact: "https://huggingface.co/datasets/Mearman/OpenAlex"
+license: CC0-1.0
+keywords:
+  - openalex
+  - bibliometrics
+  - scholarly-communication
+  - science-of-science
+  - citation-data
+abstract: >
+  Complete OpenAlex snapshot — scholarly metadata for works, authors,
+  sources, institutions, publishers, funders, awards, topics, concepts,
+  fields, subfields, and domains. Source data in JSONL format with
+  extracted Parquet relationship tables.
