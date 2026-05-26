@@ -2,15 +2,15 @@ cff-version: 1.2.0
 message: "If you use this dataset, please cite it as below."
 type: dataset
 authors:
-- family-names: "Mearman"
-  given-names: "Joseph"
+  - family-names: "Mearman"
+    given-names: "Joseph"
 title: "OpenAlex"
-version: f5ffc05
-doi: 10.57967/hf/7682
+version: "1.0"
+identifiers:
+  - type: doi
+    value: "10.57967/hf/7682"
 date-released: 2026-05-26
 url: "https://huggingface.co/datasets/Mearman/OpenAlex"
-repository: "https://github.com/Mearman/OpenAlex"
-repository-artifact: "https://huggingface.co/datasets/Mearman/OpenAlex"
 license: CC0-1.0
 keywords:
   - openalex
