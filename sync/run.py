@@ -161,6 +161,7 @@ def cmd_upload(args) -> None:
         folder_path=str(SYNC_ROOT),
         repo_type="dataset",
         allow_patterns=["*.parquet"],
+        ignore_patterns=["._*"],  # Apple Double files on ExFAT drives
         num_workers=num_workers,
     )
 

@@ -48,13 +48,19 @@ def _fetch_manifest(entity: str) -> dict[str, dict]:
 def _hf_source_files_for_entity(entity: str) -> set[str] | None:
     """List .jsonl.gz files on HuggingFace for a specific entity.
 
-    Returns None if the listing fails (e.g. too many files), signalling
-    the caller should fall back to per-file checks.
+    For large entities (works), uses shallow listing of partition directories
+    then per-partition file enumeration to avoid timeouts on recursive listing
+    of directories with tens of thousands of files.
+
+    Returns None if the listing fails, signalling the caller should fall back
+    to per-file checks.
     """
     from huggingface_hub import HfApi
     api = HfApi()
-    result: set[str] = set()
+
+    # Try recursive listing first — fast for small entities
     try:
+        result: set[str] = set()
         for item in api.list_repo_tree(
             repo_id=HF_REPO_ID,
             repo_type="dataset",
@@ -63,9 +69,37 @@ def _hf_source_files_for_entity(entity: str) -> set[str] | None:
         ):
             if item.path.endswith(".jsonl.gz"):
                 result.add(item.path)
+        return result
+    except Exception:
+        pass
+
+    # Fallback: shallow + per-partition approach for large entities.
+    # 1. List partition directories (non-recursive — fast).
+    # 2. For each partition, list files individually.
+    try:
+        partition_dirs: set[str] = set()
+        for item in api.list_repo_tree(
+            repo_id=HF_REPO_ID,
+            repo_type="dataset",
+            path_in_repo=f"data/{entity}",
+            recursive=False,
+        ):
+            if item.path.startswith(f"data/{entity}/updated_date="):
+                partition_dirs.add(item.path)
+
+        result = set()
+        for part_dir in partition_dirs:
+            for item in api.list_repo_tree(
+                repo_id=HF_REPO_ID,
+                repo_type="dataset",
+                path_in_repo=part_dir,
+                recursive=True,
+            ):
+                if item.path.endswith(".jsonl.gz"):
+                    result.add(item.path)
+        return result
     except Exception:
         return None
-    return result
 
 
 def _s3_key_to_hf_path(s3_key: str) -> str:
