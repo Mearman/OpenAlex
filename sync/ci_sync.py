@@ -82,20 +82,18 @@ def _list_s3_shards(entity: str) -> dict[str, dict]:
 # ── HF helpers ───────────────────────────────────────────────────────────
 
 
-def _hf_source_files_for_entity(entity: str) -> set[str] | None:
-    """List .jsonl.gz files on HuggingFace for a specific entity.
+def _hf_list_files(entity: str, extension: str) -> set[str] | None:
+    """List files with a given extension on HF for an entity.
 
     Uses recursive listing first (fast for small entities). Falls back to
     shallow partition-directory listing + per-partition enumeration for
     large entities where recursive listing may timeout.
 
-    Returns None if all listing approaches fail, signalling the caller
-    should fall back to per-file existence checks.
+    Returns None if all listing approaches fail.
     """
     from huggingface_hub import HfApi
     api = HfApi()
 
-    # Try recursive listing first — fast for small entities
     try:
         result: set[str] = set()
         for item in api.list_repo_tree(
@@ -104,7 +102,7 @@ def _hf_source_files_for_entity(entity: str) -> set[str] | None:
             path_in_repo=f"data/{entity}",
             recursive=True,
         ):
-            if item.path.endswith(".jsonl.gz"):
+            if item.path.endswith(extension):
                 result.add(item.path)
         return result
     except Exception:
@@ -130,11 +128,49 @@ def _hf_source_files_for_entity(entity: str) -> set[str] | None:
                 path_in_repo=part_dir,
                 recursive=True,
             ):
-                if item.path.endswith(".jsonl.gz"):
+                if item.path.endswith(extension):
                     result.add(item.path)
         return result
     except Exception:
         return None
+
+
+def _hf_source_files_for_entity(entity: str) -> set[str] | None:
+    """List .jsonl.gz files on HuggingFace for a specific entity."""
+    return _hf_list_files(entity, ".jsonl.gz")
+
+
+def _s3_key_to_shard_key(s3_key: str) -> str:
+    """Derive a shard key from an S3 key.
+
+    s3 key:   data/works/updated_date=2024-01-13/part_0000.gz
+    shard key: works__updated_date=2024-01-13__part_0000
+    """
+    parts = s3_key.split("/")
+    entity = parts[1]  # e.g. "works"
+    partition = parts[2]  # e.g. "updated_date=2024-01-13"
+    filename = parts[-1]  # e.g. "part_0000.gz"
+    stem = filename.rsplit(".", 1)[0]  # e.g. "part_0000"
+    return f"{entity}__{partition}__{stem}"
+
+
+def _parquet_shard_keys_on_hf(entity: str) -> set[str] | None:
+    """Extract shard keys from parquet file paths on HF for an entity.
+
+    Parquet paths are like:
+      data/works/authorships/works__updated_date=2024-01-13__part_0000.parquet
+    The shard key is the filename stem:
+      works__updated_date=2024-01-13__part_0000
+    """
+    parquet_files = _hf_list_files(entity, ".parquet")
+    if parquet_files is None:
+        return None
+    keys = set()
+    for path in parquet_files:
+        filename = path.split("/")[-1]  # works__...__part_0000.parquet
+        key = filename.rsplit(".", 1)[0]  # works__...__part_0000
+        keys.add(key)
+    return keys
 
 
 # ── Path conversion ──────────────────────────────────────────────────────
@@ -236,7 +272,11 @@ def _prepare_shard(entity: str, s3_key: str, staging_dir: Path) -> list:
 
 
 def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
-    """Compare S3 manifests against HF to find new shards.
+    """Compare S3 manifests against HF to find shards needing sync.
+
+    A shard needs syncing if either:
+    1. Its source .jsonl.gz file is not on HF, OR
+    2. Its source file is on HF but its parquet extractions are missing
 
     For entities without manifests (e.g. awards), falls back to S3
     directory listing.
@@ -244,7 +284,7 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
     Args:
         entity_filter: If set, only detect for this entity. Otherwise all.
 
-    Returns {entity: [s3_key, ...]} for each entity with new files.
+    Returns {entity: [s3_key, ...]} for each entity with gaps.
     """
     from huggingface_hub import HfApi
     api = HfApi()
@@ -262,15 +302,38 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
         if not manifest:
             continue
 
-        hf_files = _hf_source_files_for_entity(entity)
+        hf_source_files = _hf_source_files_for_entity(entity)
 
-        if hf_files is not None:
-            new_for_entity = []
+        if hf_source_files is not None:
+            # First pass: find missing source files
+            missing_source = []
+            has_source = []
             for s3_key in manifest:
                 hf_path = _s3_key_to_hf_path(s3_key)
-                if hf_path not in hf_files:
-                    new_for_entity.append(s3_key)
+                if hf_path not in hf_source_files:
+                    missing_source.append(s3_key)
+                else:
+                    has_source.append(s3_key)
+
+            # Second pass: check if existing source files have parquet extractions
+            if has_source:
+                parquet_keys = _parquet_shard_keys_on_hf(entity)
+                missing_parquet = []
+                for s3_key in has_source:
+                    shard_key = _s3_key_to_shard_key(s3_key)
+                    if parquet_keys is None:
+                        # Can't check — use per-file fallback
+                        break
+                    if shard_key not in parquet_keys:
+                        missing_parquet.append(s3_key)
+            else:
+                missing_parquet = []
+
+            new_for_entity = missing_source + missing_parquet
         else:
+            # Tree listing failed — check each manifest entry individually.
+            # Only check for missing source files; can't verify parquet
+            # completeness without a tree listing.
             new_for_entity = []
             for s3_key in manifest:
                 hf_path = _s3_key_to_hf_path(s3_key)
