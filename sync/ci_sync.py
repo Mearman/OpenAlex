@@ -7,6 +7,9 @@ extracts to parquet, and uploads each one.
 
 Designed for CI: processes one shard at a time to keep disk bounded, with
 per-shard error isolation, retries, timeouts, and structured result logging.
+
+Supports dynamic GitHub Actions matrix splitting by entity, relationship
+type, and batch index for parallel sync.
 """
 from __future__ import annotations
 
@@ -37,7 +40,48 @@ SHARD_TIMEOUT = 600
 # Maximum consecutive failures before aborting the sync run.
 MAX_CONSECUTIVE_FAILURES = 5
 
+# GitHub Actions matrix row limit.
+MAX_MATRIX_ENTRIES = 256
+
+# Shards per matrix entry. Larger = fewer jobs but longer per job.
+SHARDS_PER_BATCH = 50
+
 log = logging.getLogger("openalex-sync")
+
+
+# ── Entity relationship types ────────────────────────────────────────────
+# Mirror of extract.py _ENTITY_DISPATCH relationship type counts.
+# Used for matrix generation — relationship splitting is only applied to
+# entities with multiple relationship types.
+
+_ENTITY_REL_COUNTS: dict[str, int] = {
+    "works": 18,
+    "authors": 9,
+    "sources": 9,
+    "institutions": 10,
+    "publishers": 6,
+    "funders": 4,
+    "concepts": 4,
+    "topics": 5,
+    "subfields": 4,
+    "fields": 3,
+    "domains": 2,
+    "sdgs": 1,
+    "awards": 3,
+}
+
+
+def _entity_rel_types(entity: str) -> list[str] | None:
+    """Get relationship type names for an entity.
+
+    Returns None if the entity doesn't support relationship extraction.
+    Returns a list of relationship subdirectory names (as they appear on HF).
+    """
+    from sync.extract import _ENTITY_DISPATCH, nested_rt_path
+    if entity not in _ENTITY_DISPATCH:
+        return None
+    rel_types, _ = _ENTITY_DISPATCH[entity]
+    return sorted(nested_rt_path(rt) for rt in rel_types)
 
 
 # ── S3 helpers ───────────────────────────────────────────────────────────
@@ -65,11 +109,7 @@ def _fetch_manifest(entity: str) -> dict[str, dict]:
 
 
 def _list_s3_shards(entity: str) -> dict[str, dict]:
-    """List .gz files on S3 for a manifest-less entity.
-
-    Used as a fallback for entities without manifests (e.g. awards).
-    Returns {s3_key: {}} with empty meta since we have no metadata.
-    """
+    """List .gz files on S3 for a manifest-less entity."""
     s3 = _s3_client()
     prefix = f"data/{entity}/"
     entries: dict[str, dict] = {}
@@ -90,14 +130,8 @@ def _parquet_path_key(path: str) -> str:
 
     data/works/abstracts/works__updated_date=2024-01-13__part_0000.parquet
       → abstracts/works__updated_date=2024-01-13__part_0000
-
-    The relationship type (parent dir) is included so that parquets from
-    different relationship subdirs for the same source file produce
-    distinct keys.
     """
     parts = path.split("/")
-    # parts[-2] = relationship dir (e.g. "abstracts")
-    # parts[-1] = filename (e.g. "works__...__part_0000.parquet")
     filename = parts[-1].rsplit(".", 1)[0]
     return f"{parts[-2]}/{filename}"
 
@@ -106,10 +140,6 @@ def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
     """List all files on HF for an entity in a single pass.
 
     Returns (source_files, parquet_rel_keys) or None if listing fails.
-    - source_files: set of .jsonl.gz paths
-    - parquet_rel_keys: set of "{rel_type}/{shard_key}" strings — includes the
-      relationship subdirectory so parquets from different subdirs for the same
-      source file are distinct.
     """
     from huggingface_hub import HfApi
     api = HfApi()
@@ -130,7 +160,9 @@ def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
         return source_files, parquet_rel_keys
     except Exception as e:
         log.warning("Recursive listing failed for %s: %s", entity, e)
-        pass
+
+    # Fallback: shallow + per-partition approach for large entities.
+    try:
         partition_dirs: set[str] = set()
         for item in api.list_repo_tree(
             repo_id=HF_REPO_ID,
@@ -163,14 +195,13 @@ def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
 def _s3_key_to_shard_key(s3_key: str) -> str:
     """Derive a shard key from an S3 key.
 
-    s3 key:   data/works/updated_date=2024-01-13/part_0000.gz
-    shard key: works__updated_date=2024-01-13__part_0000
+    data/works/updated_date=2024-01-13/part_0000.gz
+      → works__updated_date=2024-01-13__part_0000
     """
     parts = s3_key.split("/")
-    entity = parts[1]  # e.g. "works"
-    partition = parts[2]  # e.g. "updated_date=2024-01-13"
-    filename = parts[-1]  # e.g. "part_0000.gz"
-    stem = filename.rsplit(".", 1)[0]  # e.g. "part_0000"
+    entity = parts[1]
+    partition = parts[2]
+    stem = parts[-1].rsplit(".", 1)[0]
     return f"{entity}__{partition}__{stem}"
 
 
@@ -178,11 +209,7 @@ def _s3_key_to_shard_key(s3_key: str) -> str:
 
 
 def _s3_key_to_hf_path(s3_key: str) -> str:
-    """Convert S3 key to HF path with .jsonl.gz extension.
-
-    s3 key:   data/works/updated_date=2024-01-13/part_0000.gz
-    hf path:  data/works/updated_date=2024-01-13/part_0000.jsonl.gz
-    """
+    """Convert S3 key to HF path with .jsonl.gz extension."""
     if s3_key.endswith(".gz") and not s3_key.endswith(".jsonl.gz"):
         return s3_key[:-3] + ".jsonl.gz"
     return s3_key
@@ -198,9 +225,37 @@ def _download_shard(s3_key: str, dest: Path) -> None:
     s3.download_file(S3_BUCKET, s3_key, str(dest))
 
 
-def _extract_shard(source_path: Path, entity: str, output_dir: Path) -> list[Path]:
-    """Extract a single source shard to parquet. Returns list of parquet files."""
-    from sync.extract import convert_relationships
+def _extract_shard(
+    source_path: Path,
+    entity: str,
+    output_dir: Path,
+    relationship: str | None = None,
+) -> list[Path]:
+    """Extract a single source shard to parquet.
+
+    Args:
+        source_path: Path to the .jsonl.gz source file.
+        entity: Entity type (e.g. "works").
+        output_dir: Directory to write parquet files into.
+        relationship: If set, only extract this relationship type (subdir name
+            like "abstracts"). Other relationship types are excluded.
+
+    Returns list of parquet file paths written.
+    """
+    from sync.extract import convert_relationships, _ENTITY_DISPATCH, nested_rt_path
+
+    # Build exclude set if filtering to a single relationship type
+    exclude: frozenset[str] | None = None
+    if relationship is not None and entity in _ENTITY_DISPATCH:
+        all_rel_types, _ = _ENTITY_DISPATCH[entity]
+        # The relationship param is a subdir name (e.g. "abstracts").
+        # Find the matching relationship type name.
+        matching = {
+            rt for rt in all_rel_types
+            if nested_rt_path(rt) == relationship
+        }
+        if matching:
+            exclude = all_rel_types - matching
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
@@ -218,7 +273,9 @@ def _extract_shard(source_path: Path, entity: str, output_dir: Path) -> list[Pat
         common.SNAPSHOT_DIR = tmp_dir / "data"
 
         try:
-            convert_relationships(entity, force=True, workers=1)
+            convert_relationships(
+                entity, force=True, workers=2, exclude=exclude,
+            )
         finally:
             common.SNAPSHOT_DIR = original_snapshot
 
@@ -233,7 +290,12 @@ def _extract_shard(source_path: Path, entity: str, output_dir: Path) -> list[Pat
         return result
 
 
-def _prepare_shard(entity: str, s3_key: str, staging_dir: Path) -> list:
+def _prepare_shard(
+    entity: str,
+    s3_key: str,
+    staging_dir: Path,
+    relationship: str | None = None,
+) -> list:
     """Download and extract a shard into staging. Returns CommitOperationAdd list."""
     from huggingface_hub import CommitOperationAdd
 
@@ -247,16 +309,25 @@ def _prepare_shard(entity: str, s3_key: str, staging_dir: Path) -> list:
     jsonl_gz = staging_dir / (local_gz.stem + ".jsonl.gz")
     shutil.move(str(local_gz), str(jsonl_gz))
 
-    # Extract to parquet
-    parquet_files = _extract_shard(jsonl_gz, entity, staging_dir / "parquet")
+    # Extract to parquet (optionally filtered by relationship)
+    parquet_files = _extract_shard(
+        jsonl_gz, entity, staging_dir / "parquet",
+        relationship=relationship,
+    )
 
-    # Build upload operations — files must exist on disk until the commit is made
-    operations = [
-        CommitOperationAdd(
-            path_in_repo=hf_path,
-            path_or_fileobj=str(jsonl_gz),
+    # Build upload operations
+    operations: list = []
+
+    # Only upload the source file if we're NOT splitting by relationship
+    # (source file upload is shared across all relationship types)
+    if relationship is None:
+        operations.append(
+            CommitOperationAdd(
+                path_in_repo=hf_path,
+                path_or_fileobj=str(jsonl_gz),
+            )
         )
-    ]
+
     for pq in parquet_files:
         pq_rel = pq.relative_to(staging_dir / "parquet")
         operations.append(
@@ -277,13 +348,7 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
 
     A shard needs syncing if either:
     1. Its source .jsonl.gz file is not on HF, OR
-    2. Its source file is on HF but its parquet extractions are missing
-
-    For entities without manifests (e.g. awards), falls back to S3
-    directory listing.
-
-    Args:
-        entity_filter: If set, only detect for this entity. Otherwise all.
+    2. Its source file is on HF but its parquet extractions are incomplete
 
     Returns {entity: [s3_key, ...]} for each entity with gaps.
     """
@@ -296,7 +361,6 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
     new_shards: dict[str, list[str]] = {}
 
     for entity in entities:
-        # Try manifest first, fall back to S3 directory listing
         manifest = _fetch_manifest(entity)
         if not manifest:
             manifest = _list_s3_shards(entity)
@@ -311,19 +375,14 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
         if state is not None:
             hf_source_files, parquet_rel_keys = state
 
-            # Derive expected relationship types from the parquet data.
-            # If a relationship type appears in any shard's parquets, it's
-            # expected for all shards of this entity.
             all_rel_types = {k.split("/", 1)[0] for k in parquet_rel_keys}
             expected_count = len(all_rel_types)
 
-            # Build shard_key → set of present rel_types
             shard_rels: dict[str, set[str]] = {}
             for rk in parquet_rel_keys:
                 rel, shard_key = rk.split("/", 1)
                 shard_rels.setdefault(shard_key, set()).add(rel)
 
-            # First pass: find missing source files
             missing_source = []
             has_source = []
             for s3_key in manifest:
@@ -333,7 +392,6 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
                 else:
                     has_source.append(s3_key)
 
-            # Second pass: check if existing source files have all parquet extractions
             missing_parquet = []
             for s3_key in has_source:
                 shard_key = _s3_key_to_shard_key(s3_key)
@@ -343,9 +401,6 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
 
             new_for_entity = missing_source + missing_parquet
         else:
-            # Tree listing failed — check each manifest entry individually.
-            # Only check for missing source files; can't verify parquet
-            # completeness without a tree listing.
             new_for_entity = []
             for s3_key in manifest:
                 hf_path = _s3_key_to_hf_path(s3_key)
@@ -358,35 +413,191 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
     return new_shards
 
 
+# ── Matrix generation ────────────────────────────────────────────────────
+
+
+def prepare_matrix(
+    entity_filter: str | None = None,
+    shards_per_batch: int = SHARDS_PER_BATCH,
+    max_entries: int = MAX_MATRIX_ENTRIES,
+) -> list[dict]:
+    """Generate a GitHub Actions matrix from detect results.
+
+    Each matrix entry describes a work unit for a parallel sync job:
+      - entity: which entity type
+      - relationship: which relationship type (or "*" for all)
+      - batch_index: which batch of shards within this (entity, relationship) pair
+      - shard_count: how many shards in this batch
+      - total_shards: total shards for this (entity, relationship) pair
+
+    Splitting strategy:
+      1. For each entity with new shards, decide if relationship splitting
+         is worthwhile (entity has >1 relationship type AND enough shards).
+      2. If splitting by relationship, each relationship type gets its own
+         set of batches. The source file is uploaded only once (by the first
+         relationship batch or by a dedicated "source-only" entry).
+      3. If not splitting by relationship, batch shards normally.
+
+    Returns list of matrix entries (dicts with string values).
+    """
+    new_shards = detect_new_shards(entity_filter=entity_filter)
+
+    if not new_shards:
+        return []
+
+    matrix: list[dict] = []
+
+    for entity, s3_keys in new_shards.items():
+        rel_types = _entity_rel_types(entity)
+        rel_count = _ENTITY_REL_COUNTS.get(entity, 1)
+
+        if rel_types and len(rel_types) > 1 and len(s3_keys) >= shards_per_batch:
+            # Split by relationship type — each relationship gets its own
+            # set of batches. Source files are uploaded by a dedicated batch
+            # to avoid duplication.
+            #
+            # Add a source-only entry for uploading .jsonl.gz files.
+            # This entry has relationship="*" and handles just the source
+            # file uploads (no extraction).
+            n_source_batches = -(-len(s3_keys) // shards_per_batch)  # ceil div
+            for i in range(n_source_batches):
+                start = i * shards_per_batch
+                batch = s3_keys[start:start + shards_per_batch]
+                matrix.append({
+                    "entity": entity,
+                    "relationship": "*",
+                    "batch_index": str(i),
+                    "shard_count": str(len(batch)),
+                    "total_shards": str(len(s3_keys)),
+                    "label": f"{entity}/source/{i}",
+                })
+
+            # Add per-relationship extraction batches
+            for rel in rel_types:
+                n_batches = -(-len(s3_keys) // shards_per_batch)
+                for i in range(n_batches):
+                    start = i * shards_per_batch
+                    batch_count = min(shards_per_batch, len(s3_keys) - start)
+                    matrix.append({
+                        "entity": entity,
+                        "relationship": rel,
+                        "batch_index": str(i),
+                        "shard_count": str(batch_count),
+                        "total_shards": str(len(s3_keys)),
+                        "label": f"{entity}/{rel}/{i}",
+                    })
+        else:
+            # No relationship splitting — batch shards normally
+            n_batches = -(-len(s3_keys) // shards_per_batch)
+            for i in range(n_batches):
+                start = i * shards_per_batch
+                batch = s3_keys[start:start + shards_per_batch]
+                matrix.append({
+                    "entity": entity,
+                    "relationship": "*",
+                    "batch_index": str(i),
+                    "shard_count": str(len(batch)),
+                    "total_shards": str(len(s3_keys)),
+                    "label": f"{entity}/all/{i}",
+                })
+
+    # Cap at max entries by increasing batch size
+    if len(matrix) > max_entries:
+        log.warning(
+            "Matrix has %d entries (max %d). Increasing batch sizes.",
+            len(matrix), max_entries,
+        )
+        # Re-run with larger batch size to reduce entries
+        new_batch_size = shards_per_batch
+        while len(matrix) > max_entries and new_batch_size < 10000:
+            new_batch_size *= 2
+            matrix = _regenerate_matrix(
+                new_shards, new_batch_size,
+            )
+
+    return matrix
+
+
+def _regenerate_matrix(
+    new_shards: dict[str, list[str]],
+    shards_per_batch: int,
+) -> list[dict]:
+    """Regenerate matrix with a given batch size (for capping)."""
+    matrix: list[dict] = []
+
+    for entity, s3_keys in new_shards.items():
+        rel_types = _entity_rel_types(entity)
+        rel_count = _ENTITY_REL_COUNTS.get(entity, 1)
+
+        if rel_types and len(rel_types) > 1 and len(s3_keys) >= shards_per_batch:
+            n_source_batches = -(-len(s3_keys) // shards_per_batch)
+            for i in range(n_source_batches):
+                start = i * shards_per_batch
+                batch = s3_keys[start:start + shards_per_batch]
+                matrix.append({
+                    "entity": entity,
+                    "relationship": "*",
+                    "batch_index": str(i),
+                    "shard_count": str(len(batch)),
+                    "total_shards": str(len(s3_keys)),
+                    "label": f"{entity}/source/{i}",
+                })
+            for rel in rel_types:
+                n_batches = -(-len(s3_keys) // shards_per_batch)
+                for i in range(n_batches):
+                    start = i * shards_per_batch
+                    batch_count = min(shards_per_batch, len(s3_keys) - start)
+                    matrix.append({
+                        "entity": entity,
+                        "relationship": rel,
+                        "batch_index": str(i),
+                        "shard_count": str(batch_count),
+                        "total_shards": str(len(s3_keys)),
+                        "label": f"{entity}/{rel}/{i}",
+                    })
+        else:
+            n_batches = -(-len(s3_keys) // shards_per_batch)
+            for i in range(n_batches):
+                start = i * shards_per_batch
+                batch = s3_keys[start:start + shards_per_batch]
+                matrix.append({
+                    "entity": entity,
+                    "relationship": "*",
+                    "batch_index": str(i),
+                    "shard_count": str(len(batch)),
+                    "total_shards": str(len(s3_keys)),
+                    "label": f"{entity}/all/{i}",
+                })
+
+    return matrix
+
+
 # ── Sync ─────────────────────────────────────────────────────────────────
 
-# SyncResult is written as JSONL at the end of a run for CI artifact upload.
-SyncResult = dict  # {"entity": str, "s3_key": str, "status": str, "files": int, "error": str|None, "seconds": float}
+SyncResult = dict  # {"entity": str, "s3_key": str, "status": str, ...}
 
-
-# HF free-tier rate limit: 128 commits per hour. Stay well under with batches.
 COMMIT_BATCH_SIZE = 50
-# Maximum retries for a batch commit (handles 429 rate limits).
 COMMIT_MAX_RETRIES = 3
 
 
 def sync_shards(
     new_shards: dict[str, list[str]] | None = None,
     entity_filter: str | None = None,
+    relationship: str | None = None,
+    batch_index: int | None = None,
 ) -> None:
     """Download, extract, and upload new shards to HuggingFace.
 
-    Batches multiple shards into a single commit to stay under the HF
-    rate limit (128 commits/hour on the free tier). Within each batch,
-    shards are downloaded and extracted one at a time to keep disk bounded.
-    All files from the batch are committed together, then the staging
-    directory is cleaned up.
+    When relationship and batch_index are provided, processes only the
+    specified slice of work (for matrix parallelism).
 
-    Isolates failures per shard — a bad shard is skipped, not retried
-    within the batch. Failed shards are logged for the next run.
-    Aborts after MAX_CONSECUTIVE_FAILURES consecutive unrecoverable failures.
-
-    Writes a sync_results.jsonl file with per-shard outcomes.
+    Args:
+        new_shards: Pre-computed detect results. If None, runs detect.
+        entity_filter: Only process this entity.
+        relationship: Only extract this relationship type ("*" = all).
+            If None, processes all relationships.
+        batch_index: Only process this batch of shards (0-indexed).
+            If None, processes all shards.
     """
     from huggingface_hub import HfApi
 
@@ -404,8 +615,17 @@ def sync_shards(
             for s3_key in new_shards[entity]:
                 queue.append((entity, s3_key))
 
+    # Apply batch slicing
+    if batch_index is not None:
+        batch_start = batch_index * COMMIT_BATCH_SIZE
+        queue = queue[batch_start:batch_start + COMMIT_BATCH_SIZE]
+        if not queue:
+            print(f"Batch {batch_index} is empty, nothing to do")
+            return
+
     total = len(queue)
-    print(f"Syncing {total} new shards in batches of {COMMIT_BATCH_SIZE}")
+    rel_label = relationship or "all"
+    print(f"Syncing {total} shards (relationship={rel_label})")
 
     api = HfApi()
     results: list[SyncResult] = []
@@ -414,9 +634,13 @@ def sync_shards(
     consecutive_failures = 0
     processed = 0
 
+    # Determine the effective relationship filter
+    # "*" means "all relationships" (no filtering)
+    effective_rel = None if (relationship is None or relationship == "*") else relationship
+
     for batch_start in range(0, total, COMMIT_BATCH_SIZE):
         batch = queue[batch_start:batch_start + COMMIT_BATCH_SIZE]
-        batch_ops: list = []  # Accumulated CommitOperationAdd
+        batch_ops: list = []
         batch_staging_dirs: list[Path] = []
         batch_results: list[SyncResult] = []
 
@@ -429,13 +653,13 @@ def sync_shards(
                 "files": 0,
                 "error": None,
                 "seconds": 0.0,
+                "relationship": rel_label,
             }
 
             t0 = time.monotonic()
             try:
-                # Each shard gets its own temp dir — cleaned up after commit
                 staging = Path(tempfile.mkdtemp(prefix="openalex-sync-"))
-                ops = _prepare_shard(entity, s3_key, staging)
+                ops = _prepare_shard(entity, s3_key, staging, relationship=effective_rel)
 
                 elapsed = time.monotonic() - t0
                 result["status"] = "ok"
@@ -462,11 +686,9 @@ def sync_shards(
                 consecutive_failures += 1
                 batch_results.append(result)
 
-                print(
-                    f"  [{processed}/{total}] FAILED {s3_key}: {exc}"
-                )
+                print(f"  [{processed}/{total}] FAILED {s3_key}: {exc}")
 
-        # Commit the batch with retries for rate limiting
+        # Commit the batch with retries
         if batch_ops:
             committed = False
             for attempt in range(COMMIT_MAX_RETRIES):
@@ -475,7 +697,10 @@ def sync_shards(
                         repo_id=HF_REPO_ID,
                         repo_type="dataset",
                         operations=batch_ops,
-                        commit_message=f"feat: sync {len(batch_ops)} files from {len(batch)} shards",
+                        commit_message=(
+                            f"feat: sync {len(batch_ops)} files "
+                            f"({rel_label}, batch {batch_index or 0})"
+                        ),
                     )
                     print(f"  Committed batch of {len(batch_ops)} files")
                     committed = True
@@ -484,11 +709,9 @@ def sync_shards(
                 except Exception as exc:
                     exc_str = str(exc)
                     if "429" in exc_str or "rate limit" in exc_str.lower():
-                        # Parse retry-after from the error message
                         import re
                         match = re.search(r"Retry after (\d+) seconds", exc_str)
                         wait = int(match.group(1)) if match else 300
-                        # Cap the wait at 5 minutes for safety
                         wait = min(wait, 300)
                         if attempt < COMMIT_MAX_RETRIES - 1:
                             print(
@@ -500,11 +723,10 @@ def sync_shards(
                             print(f"  Batch commit FAILED after {COMMIT_MAX_RETRIES} retries: {exc}")
                     else:
                         print(f"  Batch commit FAILED: {exc}")
-                        break  # Non-rate-limit errors are not retried
+                        break
 
             if not committed:
-                # Commit failure marks all shards in batch as failed
-                failed += len(batch_results)  # Count each shard as failed
+                failed += len(batch_results)
                 consecutive_failures += 1
                 for r in batch_results:
                     if r["status"] == "ok":
@@ -514,23 +736,16 @@ def sync_shards(
 
         results.extend(batch_results)
 
-        # Clean up staging dirs — files are now on the server
         for staging in batch_staging_dirs:
             shutil.rmtree(staging, ignore_errors=True)
 
         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-            print(
-                f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive "
-                f"unrecoverable failures"
-            )
+            print(f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive failures")
             break
 
-        # Rate limit margin: with batch_size=50 and ~30 shards/min,
-        # we do ~1 commit every 2min → 30/hr, well under the 128/hr limit.
-
-    # Write results file for CI artifact
+    # Write results
     results_path = Path("sync_results.jsonl")
-    with open(results_path, "w") as f:
+    with open(results_path, "a") as f:
         for r in results:
             f.write(json.dumps(r) + "\n")
 
@@ -551,15 +766,22 @@ if __name__ == "__main__":
     sub = parser.add_subparsers(dest="command", required=True)
 
     detect_parser = sub.add_parser("detect", help="Show new shards without syncing")
-    detect_parser.add_argument(
-        "--entity", type=str, default=None,
-        help="Only detect for this entity (default: all)",
-    )
+    detect_parser.add_argument("--entity", type=str, default=None)
+
+    matrix_parser = sub.add_parser("prepare-matrix", help="Generate GitHub Actions matrix JSON")
+    matrix_parser.add_argument("--entity", type=str, default=None)
+    matrix_parser.add_argument("--shards-per-batch", type=int, default=SHARDS_PER_BATCH)
+    matrix_parser.add_argument("--max-entries", type=int, default=MAX_MATRIX_ENTRIES)
 
     sync_parser = sub.add_parser("sync", help="Download, extract, and upload new shards")
+    sync_parser.add_argument("--entity", type=str, default=None)
     sync_parser.add_argument(
-        "--entity", type=str, default=None,
-        help="Only sync this entity (default: all)",
+        "--relationship", type=str, default=None,
+        help="Only extract this relationship type (* = all)",
+    )
+    sync_parser.add_argument(
+        "--batch-index", type=int, default=None,
+        help="Only process this batch (0-indexed)",
     )
 
     args = parser.parse_args()
@@ -578,5 +800,21 @@ if __name__ == "__main__":
                 if len(keys) > 5:
                     print(f"    ... and {len(keys) - 5} more")
 
+    elif args.command == "prepare-matrix":
+        matrix = prepare_matrix(
+            entity_filter=args.entity,
+            shards_per_batch=args.shards_per_batch,
+            max_entries=args.max_entries,
+        )
+        # Write matrix JSON to file for CI to read cleanly
+        matrix_json = json.dumps({"include": matrix})
+        with open("sync_matrix.json", "w") as f:
+            f.write(matrix_json)
+        print(f"Wrote {len(matrix)} matrix entries to sync_matrix.json")
+
     elif args.command == "sync":
-        sync_shards(entity_filter=args.entity)
+        sync_shards(
+            entity_filter=args.entity,
+            relationship=args.relationship,
+            batch_index=args.batch_index,
+        )

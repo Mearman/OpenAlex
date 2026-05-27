@@ -9,14 +9,22 @@ on:
         description: 'Entity to sync (empty = all)'
         required: false
         default: ''
+      shards-per-batch:
+        description: 'Shards per matrix entry (default 50)'
+        required: false
+        default: '50'
 
 jobs:
+  # ── Detect ───────────────────────────────────────────────────────────
+  # Runs once. Generates the dynamic matrix for parallel sync jobs.
+  # If no new shards, the sync job is skipped entirely.
+
   detect:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       has_new: ${{ steps.check.outputs.has_new }}
-      entity: ${{ steps.check.outputs.entity }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,31 +34,56 @@ jobs:
 
       - run: pip install -r sync/requirements.txt
 
-      - name: Detect new shards
-        id: check
+      - name: Generate sync matrix
+        id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           ENTITY_ARG="${{ github.event.inputs.entity }}"
-          if [ -n "$ENTITY_ARG" ]; then
-            OUTPUT=$(python3 -m sync.ci_sync detect --entity "$ENTITY_ARG" 2>&1)
-          else
-            OUTPUT=$(python3 -m sync.ci_sync detect 2>&1)
-          fi
-          echo "$OUTPUT"
+          SHARDS_ARG="${{ github.event.inputs.shards-per-batch }}"
 
-          if echo "$OUTPUT" | grep -q "No new shards"; then
+          CMD="python3 -m sync.ci_sync prepare-matrix"
+          if [ -n "$ENTITY_ARG" ]; then
+            CMD="$CMD --entity $ENTITY_ARG"
+          fi
+          if [ -n "$SHARDS_ARG" ]; then
+            CMD="$CMD --shards-per-batch $SHARDS_ARG"
+          fi
+
+          $CMD
+
+          if [ ! -f sync_matrix.json ]; then
+            echo "No matrix generated"
+            echo "has_new=false" >> $GITHUB_OUTPUT
+            echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          INCLUDE_COUNT=$(python3 -c "import json; print(len(json.load(open('sync_matrix.json'))['include']))")
+          echo "Matrix entries: $INCLUDE_COUNT"
+
+          if [ "$INCLUDE_COUNT" = "0" ]; then
             echo "has_new=false" >> $GITHUB_OUTPUT
           else
             echo "has_new=true" >> $GITHUB_OUTPUT
+            MATRIX=$(cat sync_matrix.json)
+            echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
           fi
-          echo "entity=$ENTITY_ARG" >> $GITHUB_OUTPUT
+
+  # ── Sync (matrix) ────────────────────────────────────────────────────
+  # Each matrix entry processes a slice: (entity, relationship, batch).
+  # Runs in parallel up to max-parallel jobs.
 
   sync:
     needs: detect
     if: needs.detect.outputs.has_new == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # GitHub Actions max; large runs may need this
+    timeout-minutes: 120
+    strategy:
+      max-parallel: 20
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+    name: sync / ${{ matrix.label }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,30 +93,43 @@ jobs:
 
       - run: pip install -r sync/requirements.txt
 
-      - name: Sync new shards
+      - name: Sync ${{ matrix.label }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          ENTITY_ARG="${{ needs.detect.outputs.entity }}"
-          if [ -n "$ENTITY_ARG" ]; then
-            python3 -m sync.ci_sync sync --entity "$ENTITY_ARG"
-          else
-            python3 -m sync.ci_sync sync
-          fi
+          python3 -m sync.ci_sync sync \
+            --entity "${{ matrix.entity }}" \
+            --relationship "${{ matrix.relationship }}" \
+            --batch-index "${{ matrix.batch_index }}"
 
       - name: Upload sync results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sync-results
+          name: sync-results-${{ matrix.label }}
           path: sync_results.jsonl
           retention-days: 30
           if-no-files-found: ignore
 
-      - name: Report outcome
-        if: always()
+  # ── Aggregate results ────────────────────────────────────────────────
+  # Collects all per-job results into a single summary.
+
+  report:
+    needs: sync
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sync-results-*
+          merge-multiple: true
+          path: results
+
+      - name: Summary
         run: |
-          if [ -f sync_results.jsonl ]; then
+          if [ -d results ] && ls results/sync_results.jsonl 1>/dev/null 2>&1; then
+            cat results/sync_results.jsonl > sync_results.jsonl
             echo "## Sync results" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
             cat sync_results.jsonl >> $GITHUB_STEP_SUMMARY
@@ -93,9 +139,6 @@ jobs:
             OK=$(grep -c '"status": "ok"' sync_results.jsonl || true)
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "**${OK} succeeded, ${FAILED} failed**" >> $GITHUB_STEP_SUMMARY
-
-            if [ "$FAILED" -gt 0 ]; then
-              echo "::warning::${FAILED} shards failed to sync"
-            fi
+          else
+            echo "No results files found" >> $GITHUB_STEP_SUMMARY
           fi
-
