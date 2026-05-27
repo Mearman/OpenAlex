@@ -404,6 +404,12 @@ def prepare_matrix(
     if not new_shards:
         return []
 
+    # Write detect results for sync jobs to reuse (avoids re-running detect)
+    detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
+    with open(detect_path, "w") as f:
+        json.dump(new_shards, f)
+    print(f"Detect results written to {detect_path}")
+
     matrix: list[dict] = []
 
     for entity, s3_keys in new_shards.items():
@@ -622,6 +628,10 @@ if __name__ == "__main__":
         "--batch-index", type=int, default=None,
         help="Only process this batch (0-indexed)",
     )
+    sync_parser.add_argument(
+        "--detect-file", type=str, default=None,
+        help="Load detect results from this file instead of re-running detect",
+    )
 
     args = parser.parse_args()
 
@@ -650,7 +660,7 @@ if __name__ == "__main__":
         if github_output:
             with open(github_output, "a") as f:
                 if matrix:
-                    f.write(f"has_new=true\n")
+                    f.write("has_new=true\n")
                     f.write(f"matrix={matrix_json}\n")
                 else:
                     f.write("has_new=false\n")
@@ -660,7 +670,12 @@ if __name__ == "__main__":
         print(f"Matrix: {len(matrix)} entries")
 
     elif args.command == "sync":
+        new_shards = None
+        if args.detect_file:
+            with open(args.detect_file) as f:
+                new_shards = json.load(f)
         sync_shards(
+            new_shards=new_shards,
             entity_filter=args.entity,
             batch_index=args.batch_index,
         )

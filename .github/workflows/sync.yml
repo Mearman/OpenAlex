@@ -26,9 +26,9 @@ jobs:
       has_new: ${{ steps.matrix.outputs.has_new }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
 
@@ -48,8 +48,15 @@ jobs:
           fi
           python3 -m sync.ci_sync prepare-matrix $ARGS
 
+      - name: Upload detect results
+        uses: actions/upload-artifact@v7
+        with:
+          name: detect-results
+          path: detect_results.json
+          retention-days: 1
+
   # ── Sync (matrix) ────────────────────────────────────────────────────
-  # Each matrix entry processes a slice: (entity, relationship, batch).
+  # Each matrix entry processes a slice: (entity, batch).
   # Runs in parallel up to max-parallel jobs.
 
   sync:
@@ -58,18 +65,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
-      max-parallel: 20
+      max-parallel: 10
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
     name: sync / ${{ matrix.label }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
 
       - run: pip install -r sync/requirements.txt
+
+      - name: Download detect results
+        uses: actions/download-artifact@v8
+        with:
+          name: detect-results
 
       - name: Sync ${{ matrix.label }}
         env:
@@ -77,11 +89,12 @@ jobs:
         run: |
           python3 -m sync.ci_sync sync \
             --entity "${{ matrix.entity }}" \
-            --batch-index "${{ matrix.batch_index }}"
+            --batch-index "${{ matrix.batch_index }}" \
+            --detect-file detect_results.json
 
       - name: Upload sync results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sync-results-${{ matrix.label }}
           path: sync_results.jsonl
@@ -97,7 +110,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: sync-results-*
           merge-multiple: true
