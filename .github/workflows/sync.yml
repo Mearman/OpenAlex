@@ -77,7 +77,6 @@ jobs:
         run: |
           python3 -m sync.ci_sync sync \
             --entity "${{ matrix.entity }}" \
-            --relationship "${{ matrix.relationship }}" \
             --batch-index "${{ matrix.batch_index }}"
 
       - name: Upload sync results
