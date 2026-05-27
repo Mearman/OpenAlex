@@ -37,8 +37,12 @@ HF_REPO_ID = "Mearman/OpenAlex"
 # so extraction may take a while. 10 minutes is generous.
 SHARD_TIMEOUT = 600
 
-# Shards per matrix entry. Larger = fewer jobs but longer per job.
-SHARDS_PER_BATCH = 200
+# Maximum number of shards per sync job.
+# Since per-shard upload keeps disk bounded, this controls parallelism and
+# matrix size, not disk usage. Higher = fewer jobs but longer per job.
+# Works (18 rel types) at 22 shards/job = 86 jobs for a full sync — too many.
+# At 100 shards/job = 19 works jobs, much more reasonable.
+MAX_SHARDS_PER_JOB = 100
 
 log = logging.getLogger("openalex-sync")
 
@@ -63,6 +67,22 @@ _ENTITY_REL_COUNTS: dict[str, int] = {
     "sdgs": 1,
     "awards": 3,
 }
+
+
+def _shards_per_job_for_entity(entity: str, total_shards: int) -> int:
+    """Compute batch size weighted by relationship type count.
+
+    Works has 18 relationship types, producing more parquets per shard
+    than smaller entities. This ensures jobs have roughly equal output
+    volume. Since per-shard upload keeps disk bounded, the batch size
+    primarily controls parallelism and matrix size.
+    """
+    rel_count = _ENTITY_REL_COUNTS.get(entity, 1)
+    # Scale inversely with rel count: works gets fewer shards per job
+    # to keep individual job duration reasonable.
+    base = MAX_SHARDS_PER_JOB
+    scaled = max(1, base * 10 // (rel_count + 9))  # works: ~35, authors: ~52, sdgs: 100
+    return min(scaled, total_shards)
 
 
 def _entity_rel_types(entity: str) -> list[str] | None:
@@ -377,15 +397,15 @@ def detect_new_shards(
 
 def prepare_matrix(
     entity_filter: str | None = None,
-    shards_per_batch: int = SHARDS_PER_BATCH,
+    shards_per_batch: int | None = None,
     cache_dir: Path | None = None,
 ) -> list[dict]:
     """Generate a GitHub Actions matrix from detect results.
 
     Each matrix entry is a (entity, batch_index) pair. The sync job handles
-    ALL relationship types for its assigned batch of shards — no relationship
-    splitting. This keeps the matrix small (~25 entries for a full sync)
-    and avoids duplicate source file uploads.
+    ALL relationship types for its assigned batch of shards. Batch size is
+    weighted by entity relationship type count to keep per-job output roughly
+    equal.
 
     Returns list of matrix entries (dicts with string values).
     """
@@ -397,19 +417,17 @@ def prepare_matrix(
     # Write detect results for sync jobs to reuse (avoids re-running detect)
     detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
     with open(detect_path, "w") as f:
-        json.dump({
-            "shards": new_shards,
-            "shards_per_batch": shards_per_batch,
-        }, f)
+        json.dump({"shards": new_shards}, f)
     print(f"Detect results written to {detect_path}")
 
     matrix: list[dict] = []
 
     for entity, s3_keys in new_shards.items():
-        n_batches = -(-len(s3_keys) // shards_per_batch)  # ceil div
+        spj = _shards_per_job_for_entity(entity, len(s3_keys))
+        n_batches = -(-len(s3_keys) // spj)  # ceil div
         for i in range(n_batches):
-            start = i * shards_per_batch
-            batch = s3_keys[start:start + shards_per_batch]
+            start = i * spj
+            batch = s3_keys[start:start + spj]
             matrix.append({
                 "entity": entity,
                 "batch_index": str(i),
@@ -430,7 +448,7 @@ def sync_shards(
     new_shards: dict[str, list[str]] | None = None,
     entity_filter: str | None = None,
     batch: int | None = None,
-    shards_per_job: int = SHARDS_PER_BATCH,
+    shards_per_job: int | None = None,
 ) -> None:
     """Download, extract, and upload new shards to HuggingFace.
 
@@ -445,7 +463,8 @@ def sync_shards(
         entity_filter: Only process this entity.
         batch: Batch index within entity (0-indexed).
             If None, processes all shards for the entity.
-        shards_per_job: Shards per batch (must match detect-entities).
+        shards_per_job: Shards per batch (unused — weighted batching is
+            computed from entity relationship counts).
     """
     from concurrent.futures import ThreadPoolExecutor
     from huggingface_hub import HfApi
@@ -466,8 +485,10 @@ def sync_shards(
 
     # Apply batch slicing for large entities
     if batch is not None:
-        batch_start = batch * shards_per_job
-        queue = queue[batch_start:batch_start + shards_per_job]
+        entity_name_for_batch = queue[0][0] if queue else "works"
+        spj = _shards_per_job_for_entity(entity_name_for_batch, len(queue))
+        batch_start = batch * spj
+        queue = queue[batch_start:batch_start + spj]
         if not queue:
             print(f"Batch {batch} is empty, nothing to do")
             return
@@ -690,12 +711,13 @@ def _run_cli(args: argparse.Namespace) -> None:
             json.dump({"shards": new_shards}, f)
         print(f"Detect results written to {detect_path}")
 
-        # Build matrix: large entities split into batches, small entities stay whole
+        # Build matrix: weighted by relationship type count per entity
         entries: list[dict] = []
         for entity, keys in new_shards.items():
             if not keys:
                 continue
-            n_batches = -(-len(keys) // SHARDS_PER_BATCH)
+            spj = _shards_per_job_for_entity(entity, len(keys))
+            n_batches = -(-len(keys) // spj)  # ceil div
             if n_batches == 1:
                 entries.append({"entity": entity, "batch": "0", "label": entity})
             else:
@@ -712,8 +734,9 @@ def _run_cli(args: argparse.Namespace) -> None:
             total = sum(len(v) for v in new_shards.values())
             print(f"Matrix: {len(entries)} entries")
             for entity, keys in new_shards.items():
-                n = -(-len(keys) // SHARDS_PER_BATCH)
-                print(f"  {entity}: {len(keys)} shards → {n} job(s)")
+                spj = _shards_per_job_for_entity(entity, len(keys))
+                n = -(-len(keys) // spj)
+                print(f"  {entity}: {len(keys)} shards, {spj}/batch → {n} job(s)")
             print(f"Total: {total} shards across {len(new_shards)} entities")
         else:
             print("No new shards")
@@ -762,7 +785,7 @@ if __name__ == "__main__":
 
     matrix_parser = sub.add_parser("prepare-matrix", help="Generate GitHub Actions matrix JSON")
     matrix_parser.add_argument("--entity", type=str, default=None)
-    matrix_parser.add_argument("--shards-per-batch", type=int, default=SHARDS_PER_BATCH)
+    matrix_parser.add_argument("--shards-per-batch", type=int, default=None)
     matrix_parser.add_argument("--cache-dir", type=str, default=None,
         help="Directory to cache HF listing results across runs",
     )
