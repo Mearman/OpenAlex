@@ -82,29 +82,32 @@ def _list_s3_shards(entity: str) -> dict[str, dict]:
 # ── HF helpers ───────────────────────────────────────────────────────────
 
 
-def _hf_list_files(entity: str, extension: str) -> set[str] | None:
-    """List files with a given extension on HF for an entity.
+def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
+    """List all files on HF for an entity in a single pass.
 
-    Uses recursive listing first (fast for small entities). Falls back to
-    shallow partition-directory listing + per-partition enumeration for
-    large entities where recursive listing may timeout.
-
-    Returns None if all listing approaches fail.
+    Returns (source_files, parquet_shard_keys) or None if listing fails.
+    - source_files: set of .jsonl.gz paths
+    - parquet_shard_keys: set of shard keys derived from .parquet filenames
     """
     from huggingface_hub import HfApi
     api = HfApi()
 
     try:
-        result: set[str] = set()
+        source_files: set[str] = set()
+        parquet_keys: set[str] = set()
         for item in api.list_repo_tree(
             repo_id=HF_REPO_ID,
             repo_type="dataset",
             path_in_repo=f"data/{entity}",
             recursive=True,
         ):
-            if item.path.endswith(extension):
-                result.add(item.path)
-        return result
+            if item.path.endswith(".jsonl.gz"):
+                source_files.add(item.path)
+            elif item.path.endswith(".parquet"):
+                filename = item.path.split("/")[-1]
+                key = filename.rsplit(".", 1)[0]
+                parquet_keys.add(key)
+        return source_files, parquet_keys
     except Exception:
         pass
 
@@ -120,7 +123,8 @@ def _hf_list_files(entity: str, extension: str) -> set[str] | None:
             if item.path.startswith(f"data/{entity}/updated_date="):
                 partition_dirs.add(item.path)
 
-        result = set()
+        source_files = set()
+        parquet_keys = set()
         for part_dir in partition_dirs:
             for item in api.list_repo_tree(
                 repo_id=HF_REPO_ID,
@@ -128,16 +132,15 @@ def _hf_list_files(entity: str, extension: str) -> set[str] | None:
                 path_in_repo=part_dir,
                 recursive=True,
             ):
-                if item.path.endswith(extension):
-                    result.add(item.path)
-        return result
+                if item.path.endswith(".jsonl.gz"):
+                    source_files.add(item.path)
+                elif item.path.endswith(".parquet"):
+                    filename = item.path.split("/")[-1]
+                    key = filename.rsplit(".", 1)[0]
+                    parquet_keys.add(key)
+        return source_files, parquet_keys
     except Exception:
         return None
-
-
-def _hf_source_files_for_entity(entity: str) -> set[str] | None:
-    """List .jsonl.gz files on HuggingFace for a specific entity."""
-    return _hf_list_files(entity, ".jsonl.gz")
 
 
 def _s3_key_to_shard_key(s3_key: str) -> str:
@@ -152,25 +155,6 @@ def _s3_key_to_shard_key(s3_key: str) -> str:
     filename = parts[-1]  # e.g. "part_0000.gz"
     stem = filename.rsplit(".", 1)[0]  # e.g. "part_0000"
     return f"{entity}__{partition}__{stem}"
-
-
-def _parquet_shard_keys_on_hf(entity: str) -> set[str] | None:
-    """Extract shard keys from parquet file paths on HF for an entity.
-
-    Parquet paths are like:
-      data/works/authorships/works__updated_date=2024-01-13__part_0000.parquet
-    The shard key is the filename stem:
-      works__updated_date=2024-01-13__part_0000
-    """
-    parquet_files = _hf_list_files(entity, ".parquet")
-    if parquet_files is None:
-        return None
-    keys = set()
-    for path in parquet_files:
-        filename = path.split("/")[-1]  # works__...__part_0000.parquet
-        key = filename.rsplit(".", 1)[0]  # works__...__part_0000
-        keys.add(key)
-    return keys
 
 
 # ── Path conversion ──────────────────────────────────────────────────────
@@ -302,9 +286,11 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
         if not manifest:
             continue
 
-        hf_source_files = _hf_source_files_for_entity(entity)
+        state = _hf_entity_state(entity)
 
-        if hf_source_files is not None:
+        if state is not None:
+            hf_source_files, parquet_keys = state
+
             # First pass: find missing source files
             missing_source = []
             has_source = []
@@ -316,18 +302,11 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
                     has_source.append(s3_key)
 
             # Second pass: check if existing source files have parquet extractions
-            if has_source:
-                parquet_keys = _parquet_shard_keys_on_hf(entity)
-                missing_parquet = []
-                for s3_key in has_source:
-                    shard_key = _s3_key_to_shard_key(s3_key)
-                    if parquet_keys is None:
-                        # Can't check — use per-file fallback
-                        break
-                    if shard_key not in parquet_keys:
-                        missing_parquet.append(s3_key)
-            else:
-                missing_parquet = []
+            missing_parquet = []
+            for s3_key in has_source:
+                shard_key = _s3_key_to_shard_key(s3_key)
+                if shard_key not in parquet_keys:
+                    missing_parquet.append(s3_key)
 
             new_for_entity = missing_source + missing_parquet
         else:
