@@ -806,11 +806,23 @@ if __name__ == "__main__":
             shards_per_batch=args.shards_per_batch,
             max_entries=args.max_entries,
         )
-        # Write matrix JSON to file for CI to read cleanly
         matrix_json = json.dumps({"include": matrix})
-        with open("sync_matrix.json", "w") as f:
-            f.write(matrix_json)
-        print(f"Wrote {len(matrix)} matrix entries to sync_matrix.json")
+
+        # Write directly to GITHUB_OUTPUT if available, else stdout
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if github_output:
+            delimiter = "GH_MATRIX_END_7k3m"
+            with open(github_output, "a") as f:
+                f.write(f"matrix<<{delimiter}\n")
+                f.write(matrix_json + "\n")
+                f.write(f"{delimiter}\n")
+                if matrix:
+                    f.write("has_new=true\n")
+                else:
+                    f.write("has_new=false\n")
+        else:
+            print(matrix_json)
+        print(f"Matrix: {len(matrix)} entries")
 
     elif args.command == "sync":
         sync_shards(
