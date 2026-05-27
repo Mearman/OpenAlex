@@ -140,6 +140,9 @@ def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[st
     from huggingface_hub import HfApi
     api = HfApi()
 
+    source_files: set[str] = set()
+    parquet_rel_keys: set[str] = set()
+
     # Check cache first
     if cache_dir is not None:
         cache_file = cache_dir / f"hf_state_{entity}.json"
@@ -170,8 +173,6 @@ def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[st
         return src, pq
 
     try:
-        source_files: set[str] = set()
-        parquet_rel_keys: set[str] = set()
         for item in api.list_repo_tree(
             repo_id=HF_REPO_ID,
             repo_type="dataset",
@@ -198,8 +199,8 @@ def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[st
             if item.path.startswith(f"data/{entity}/updated_date="):
                 partition_dirs.add(item.path)
 
-        source_files = set()
-        parquet_rel_keys = set()
+        source_files.clear()
+        parquet_rel_keys.clear()
         for part_dir in partition_dirs:
             for item in api.list_repo_tree(
                 repo_id=HF_REPO_ID,
@@ -428,17 +429,23 @@ SyncResult = dict  # {"entity": str, "s3_key": str, "status": str, ...}
 def sync_shards(
     new_shards: dict[str, list[str]] | None = None,
     entity_filter: str | None = None,
+    batch: int | None = None,
+    shards_per_job: int = SHARDS_PER_BATCH,
 ) -> None:
     """Download, extract, and upload new shards to HuggingFace.
 
-    Processes ALL shards for the given entity. Overlaps download of
-    shard N+1 with extraction of shard N using a background thread.
-    Uploads periodically (every 50 shards) via upload_large_folder
+    Processes shards for the given entity. If batch is set, only processes
+    that slice (for matrix parallelism on large entities). Overlaps
+    download of shard N+1 with extraction of shard N using a background
+    thread. Uploads periodically (every 50 shards) via upload_large_folder
     so progress survives timeouts.
 
     Args:
         new_shards: Pre-computed detect results. If None, runs detect.
         entity_filter: Only process this entity.
+        batch: Batch index within entity (0-indexed).
+            If None, processes all shards for the entity.
+        shards_per_job: Shards per batch (must match detect-entities).
     """
     from concurrent.futures import ThreadPoolExecutor
     from huggingface_hub import HfApi
@@ -456,6 +463,14 @@ def sync_shards(
         if entity in new_shards:
             for s3_key in new_shards[entity]:
                 queue.append((entity, s3_key))
+
+    # Apply batch slicing for large entities
+    if batch is not None:
+        batch_start = batch * shards_per_job
+        queue = queue[batch_start:batch_start + shards_per_job]
+        if not queue:
+            print(f"Batch {batch} is empty, nothing to do")
+            return
 
     total = len(queue)
     entity_name = queue[0][0] if queue else "unknown"
@@ -485,7 +500,9 @@ def sync_shards(
     _download_shard(first_key, first_dest)
 
     # Use a thread pool for overlapping download of next shard
+    from concurrent.futures import Future
     prefetch_pool = ThreadPoolExecutor(max_workers=1)
+    outstanding_future: Future[None] | None = None
 
     try:
         for i, (entity, s3_key) in enumerate(queue):
@@ -506,14 +523,15 @@ def sync_shards(
                 local_gz = first_dest
             else:
                 local_gz = staging_root / Path(s3_key).name
-                prefetch_future.result()  # wait for prefetch to finish
+                assert outstanding_future is not None
+                outstanding_future.result()  # wait for prefetch to finish
 
             # Start prefetching next shard in background
-            prefetch_future = None
+            outstanding_future = None
             if i + 1 < len(queue):
                 _, next_key = queue[i + 1]
                 next_dest = staging_root / Path(next_key).name
-                prefetch_future = prefetch_pool.submit(_prefetch, next_key, next_dest)
+                outstanding_future = prefetch_pool.submit(_prefetch, next_key, next_dest)
 
             try:
                 # Rename to .jsonl.gz
@@ -576,8 +594,8 @@ def sync_shards(
                         repo_type="dataset",
                         ignore_patterns=["._*"],
                     )
-                    uploaded_count += succeeded
-                    print(f"  Batch upload complete")
+                    uploaded_count = succeeded
+                    print("  Batch upload complete")
                     # Clean uploaded files from staging to free disk
                     for p in upload_dir.rglob("*"):
                         if p.is_file() and not p.is_symlink():
@@ -605,6 +623,7 @@ def sync_shards(
                 ignore_patterns=["._*"],
             )
             upload_elapsed = time.monotonic() - t_upload
+            uploaded_count = succeeded
             print(f"Upload complete ({upload_elapsed:.0f}s)")
         except Exception as exc:
             print(f"Upload FAILED: {exc}")
@@ -632,6 +651,99 @@ def sync_shards(
 # ── CLI ──────────────────────────────────────────────────────────────────
 
 
+def _emit_matrix(entries: list[dict]) -> None:
+    """Write matrix JSON to $GITHUB_OUTPUT or stdout."""
+    matrix_json = json.dumps({"include": entries}, separators=(',', ':'))
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a") as f:
+            if entries:
+                f.write(f"has_new=true\nmatrix={matrix_json}\n")
+            else:
+                f.write("has_new=false\nmatrix={\"include\":[]}\n")
+    else:
+        print(matrix_json)
+
+
+def _run_cli(args: argparse.Namespace) -> None:
+    """Dispatch parsed CLI arguments."""
+    if args.command == "detect":
+        shards_found = detect_new_shards(entity_filter=args.entity)
+        if not shards_found:
+            print("No new shards")
+        else:
+            total = sum(len(v) for v in shards_found.values())
+            print(f"{total} new shards:")
+            for entity, keys in shards_found.items():
+                print(f"  {entity}: {len(keys)} new")
+                for k in keys[:5]:
+                    print(f"    {k}")
+                if len(keys) > 5:
+                    print(f"    ... and {len(keys) - 5} more")
+
+    elif args.command == "detect-entities":
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
+        new_shards = detect_new_shards(entity_filter=args.entity, cache_dir=cache_dir)
+
+        detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
+        with open(detect_path, "w") as f:
+            json.dump({"shards": new_shards}, f)
+        print(f"Detect results written to {detect_path}")
+
+        # Build matrix: large entities split into batches, small entities stay whole
+        entries: list[dict] = []
+        for entity, keys in new_shards.items():
+            if not keys:
+                continue
+            n_batches = -(-len(keys) // SHARDS_PER_BATCH)
+            if n_batches == 1:
+                entries.append({"entity": entity, "batch": "0", "label": entity})
+            else:
+                for i in range(n_batches):
+                    entries.append({
+                        "entity": entity,
+                        "batch": str(i),
+                        "label": f"{entity}-{i}",
+                    })
+
+        _emit_matrix(entries)
+
+        if entries:
+            total = sum(len(v) for v in new_shards.values())
+            print(f"Matrix: {len(entries)} entries")
+            for entity, keys in new_shards.items():
+                n = -(-len(keys) // SHARDS_PER_BATCH)
+                print(f"  {entity}: {len(keys)} shards → {n} job(s)")
+            print(f"Total: {total} shards across {len(new_shards)} entities")
+        else:
+            print("No new shards")
+
+    elif args.command == "prepare-matrix":
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
+        matrix = prepare_matrix(
+            entity_filter=args.entity,
+            shards_per_batch=args.shards_per_batch,
+            cache_dir=cache_dir,
+        )
+        _emit_matrix(matrix)
+        print(f"Matrix: {len(matrix)} entries")
+
+    elif args.command == "sync":
+        loaded: dict[str, list[str]] | None = None
+        if args.detect_file:
+            with open(args.detect_file) as f:
+                detect_data = json.load(f)
+                if isinstance(detect_data, dict) and "shards" in detect_data:
+                    loaded = detect_data["shards"]
+                else:
+                    loaded = detect_data
+        sync_shards(
+            new_shards=loaded,
+            entity_filter=args.entity,
+            batch=args.batch,
+        )
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -657,98 +769,12 @@ if __name__ == "__main__":
 
     sync_parser = sub.add_parser("sync", help="Download, extract, and upload new shards")
     sync_parser.add_argument("--entity", type=str, default=None)
+    sync_parser.add_argument("--batch", type=int, default=None,
+        help="Batch index within entity (0-indexed, for matrix splitting)",
+    )
     sync_parser.add_argument(
         "--detect-file", type=str, default=None,
         help="Load detect results from this file instead of re-running detect",
     )
 
-    args = parser.parse_args()
-
-    if args.command == "detect":
-        new = detect_new_shards(entity_filter=args.entity)
-        if not new:
-            print("No new shards")
-        else:
-            total = sum(len(v) for v in new.values())
-            print(f"{total} new shards:")
-            for entity, keys in new.items():
-                print(f"  {entity}: {len(keys)} new")
-                for k in keys[:5]:
-                    print(f"    {k}")
-                if len(keys) > 5:
-                    print(f"    ... and {len(keys) - 5} more")
-
-    elif args.command == "detect-entities":
-        cache_dir = Path(args.cache_dir) if args.cache_dir else None
-        new_shards = detect_new_shards(entity_filter=args.entity, cache_dir=cache_dir)
-
-        # Write detect results for sync jobs
-        detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
-        with open(detect_path, "w") as f:
-            json.dump({"shards": new_shards}, f)
-        print(f"Detect results written to {detect_path}")
-
-        # Build entity-level matrix
-        entity_entries = [
-            {"entity": entity}
-            for entity, keys in new_shards.items()
-            if keys
-        ]
-        matrix_json = json.dumps({"include": entity_entries}, separators=(',', ':'))
-
-        github_output = os.environ.get("GITHUB_OUTPUT")
-        if github_output:
-            with open(github_output, "a") as f:
-                if entity_entries:
-                    f.write("has_new=true\n")
-                    f.write(f"matrix={matrix_json}\n")
-                else:
-                    f.write("has_new=false\n")
-                    f.write("matrix={\"include\":[]}\n")
-        else:
-            print(matrix_json)
-
-        if entity_entries:
-            total = sum(len(v) for v in new_shards.values())
-            print(f"Entities with new shards: {len(entity_entries)}")
-            for entity, keys in new_shards.items():
-                print(f"  {entity}: {len(keys)} shards")
-            print(f"Total: {total} shards across {len(entity_entries)} entities")
-        else:
-            print("No new shards")
-
-    elif args.command == "prepare-matrix":
-        cache_dir = Path(args.cache_dir) if args.cache_dir else None
-        matrix = prepare_matrix(
-            entity_filter=args.entity,
-            shards_per_batch=args.shards_per_batch,
-            cache_dir=cache_dir,
-        )
-        matrix_json = json.dumps({"include": matrix}, separators=(',', ':'))
-
-        github_output = os.environ.get("GITHUB_OUTPUT")
-        if github_output:
-            with open(github_output, "a") as f:
-                if matrix:
-                    f.write("has_new=true\n")
-                    f.write(f"matrix={matrix_json}\n")
-                else:
-                    f.write("has_new=false\n")
-                    f.write("matrix={\"include\":[]}\n")
-        else:
-            print(matrix_json)
-        print(f"Matrix: {len(matrix)} entries")
-
-    elif args.command == "sync":
-        new_shards = None
-        if args.detect_file:
-            with open(args.detect_file) as f:
-                detect_data = json.load(f)
-                if isinstance(detect_data, dict) and "shards" in detect_data:
-                    new_shards = detect_data["shards"]
-                else:
-                    new_shards = detect_data
-        sync_shards(
-            new_shards=new_shards,
-            entity_filter=args.entity,
-        )
+    _run_cli(parser.parse_args())

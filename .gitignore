@@ -27,6 +27,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.mypy_cache/
+.ruff_cache/
+.perflint_cache/
+py.typed
+.cache/
 
 # macOS
 .DS_Store

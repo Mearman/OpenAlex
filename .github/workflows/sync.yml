@@ -86,7 +86,7 @@ jobs:
       max-parallel: 10
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
-    name: sync / ${{ matrix.entity }}
+    name: sync / ${{ matrix.label }}
     steps:
       - uses: actions/checkout@v6
 
@@ -108,13 +108,14 @@ jobs:
         run: |
           python3 -m sync.ci_sync sync \
             --entity "${{ matrix.entity }}" \
+            --batch "${{ matrix.batch }}" \
             --detect-file detect_results.json
 
       - name: Upload sync results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: sync-results-${{ matrix.entity }}
+          name: sync-results-${{ matrix.label }}
           path: sync_results.jsonl
           retention-days: 30
           if-no-files-found: ignore
