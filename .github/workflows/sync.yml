@@ -66,11 +66,12 @@ jobs:
             echo "has_new=false" >> $GITHUB_OUTPUT
           else
             echo "has_new=true" >> $GITHUB_OUTPUT
-            # Multi-line output requires heredoc delimiter
-            DELIMITER=$(python3 -c "import uuid; print(uuid.uuid4().hex)")
-            echo "matrix<<${DELIMITER}" >> $GITHUB_OUTPUT
-            cat sync_matrix.json >> $GITHUB_OUTPUT
-            echo "${DELIMITER}" >> $GITHUB_OUTPUT
+            # Use EOF delimiter for multi-line matrix output
+            {
+              echo "matrix<<EOF"
+              cat sync_matrix.json
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
           fi
 
   # ── Sync (matrix) ────────────────────────────────────────────────────
