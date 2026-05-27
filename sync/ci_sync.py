@@ -377,6 +377,7 @@ def detect_new_shards(
 def prepare_matrix(
     entity_filter: str | None = None,
     shards_per_batch: int = SHARDS_PER_BATCH,
+    cache_dir: Path | None = None,
 ) -> list[dict]:
     """Generate a GitHub Actions matrix from detect results.
 
