@@ -39,12 +39,21 @@ jobs:
 
       - run: pip install -r sync/requirements.txt
 
+      - name: Restore HF listing cache
+        id: hf-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/hf-listings
+          key: hf-listings-${{ github.event.inputs.entity || 'all' }}-${{ github.run_id }}
+          restore-keys: |
+            hf-listings-${{ github.event.inputs.entity || 'all' }}-
+
       - name: Generate sync matrix
         id: matrix
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          ARGS=""
+          ARGS="--cache-dir .cache/hf-listings"
           if [ -n "${{ github.event.inputs.entity }}" ]; then
             ARGS="$ARGS --entity ${{ github.event.inputs.entity }}"
           fi
@@ -52,6 +61,13 @@ jobs:
             ARGS="$ARGS --shards-per-batch ${{ github.event.inputs.shards-per-batch }}"
           fi
           python3 -m sync.ci_sync prepare-matrix $ARGS
+
+      - name: Save HF listing cache
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .cache/hf-listings
+          key: hf-listings-${{ github.event.inputs.entity || 'all' }}-${{ github.run_id }}
 
       - name: Upload detect results
         uses: actions/upload-artifact@v7

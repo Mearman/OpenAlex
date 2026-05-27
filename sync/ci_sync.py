@@ -130,13 +130,44 @@ def _parquet_path_key(path: str) -> str:
     return f"{parts[-2]}/{filename}"
 
 
-def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
+def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[str], set[str]] | None:
     """List all files on HF for an entity in a single pass.
 
     Returns (source_files, parquet_rel_keys) or None if listing fails.
+    When cache_dir is provided, caches the listing as JSON to avoid
+    re-listing on subsequent calls within the same run or across runs.
     """
     from huggingface_hub import HfApi
     api = HfApi()
+
+    # Check cache first
+    if cache_dir is not None:
+        cache_file = cache_dir / f"hf_state_{entity}.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file) as f:
+                    cached = json.load(f)
+                source_files = set(cached.get("source_files", []))
+                parquet_rel_keys = set(cached.get("parquet_rel_keys", []))
+                log.info("Entity %s: loaded from cache (%d src, %d pq)",
+                         entity, len(source_files), len(parquet_rel_keys))
+                return source_files, parquet_rel_keys
+            except (json.JSONDecodeError, KeyError):
+                log.warning("Cache corrupt for %s, re-fetching", entity)
+
+    def _cache_result(src: set[str], pq: set[str]) -> tuple[set[str], set[str]]:
+        """Write result to cache if cache_dir is set."""
+        if cache_dir is not None:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / f"hf_state_{entity}.json"
+            with open(cache_file, "w") as f:
+                json.dump({
+                    "source_files": sorted(src),
+                    "parquet_rel_keys": sorted(pq),
+                }, f)
+            log.info("Entity %s: cached listing (%d src, %d pq)",
+                     entity, len(src), len(pq))
+        return src, pq
 
     try:
         source_files: set[str] = set()
@@ -151,7 +182,7 @@ def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
                 source_files.add(item.path)
             elif item.path.endswith(".parquet"):
                 parquet_rel_keys.add(_parquet_path_key(item.path))
-        return source_files, parquet_rel_keys
+        return _cache_result(source_files, parquet_rel_keys)
     except Exception as e:
         log.warning("Recursive listing failed for %s: %s", entity, e)
 
@@ -180,7 +211,7 @@ def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
                     source_files.add(item.path)
                 elif item.path.endswith(".parquet"):
                     parquet_rel_keys.add(_parquet_path_key(item.path))
-        return source_files, parquet_rel_keys
+        return _cache_result(source_files, parquet_rel_keys)
     except Exception as e:
         log.warning("Per-partition listing failed for %s: %s", entity, e)
         return None
@@ -267,7 +298,10 @@ def _extract_shard(
 # ── Detection ────────────────────────────────────────────────────────────
 
 
-def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
+def detect_new_shards(
+    entity_filter: str | None = None,
+    cache_dir: Path | None = None,
+) -> dict[str, list[str]]:
     """Compare S3 manifests against HF to find shards needing sync.
 
     A shard needs syncing if either:
@@ -292,7 +326,7 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
             log.info("No manifest for %s", entity)
             continue
 
-        state = _hf_entity_state(entity)
+        state = _hf_entity_state(entity, cache_dir=cache_dir)
         log.info("Entity %s: manifest=%d, state=%s", entity, len(manifest),
                  "None" if state is None else f"(src={len(state[0])}, pq={len(state[1])})")
 
@@ -353,7 +387,7 @@ def prepare_matrix(
 
     Returns list of matrix entries (dicts with string values).
     """
-    new_shards = detect_new_shards(entity_filter=entity_filter)
+    new_shards = detect_new_shards(entity_filter=entity_filter, cache_dir=cache_dir)
 
     if not new_shards:
         return []
@@ -413,7 +447,7 @@ def sync_shards(
     from huggingface_hub import HfApi
 
     if new_shards is None:
-        new_shards = detect_new_shards(entity_filter=entity_filter)
+        new_shards = detect_new_shards(entity_filter=entity_filter, cache_dir=None)
 
     if not new_shards:
         print("No new shards to sync")
@@ -596,6 +630,9 @@ if __name__ == "__main__":
     matrix_parser = sub.add_parser("prepare-matrix", help="Generate GitHub Actions matrix JSON")
     matrix_parser.add_argument("--entity", type=str, default=None)
     matrix_parser.add_argument("--shards-per-batch", type=int, default=SHARDS_PER_BATCH)
+    matrix_parser.add_argument("--cache-dir", type=str, default=None,
+        help="Directory to cache HF listing results across runs",
+    )
 
     sync_parser = sub.add_parser("sync", help="Download, extract, and upload new shards")
     sync_parser.add_argument("--entity", type=str, default=None)
@@ -625,9 +662,11 @@ if __name__ == "__main__":
                     print(f"    ... and {len(keys) - 5} more")
 
     elif args.command == "prepare-matrix":
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
         matrix = prepare_matrix(
             entity_filter=args.entity,
             shards_per_batch=args.shards_per_batch,
+            cache_dir=cache_dir,
         )
         matrix_json = json.dumps({"include": matrix}, separators=(',', ':'))
 
