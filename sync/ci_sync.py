@@ -407,7 +407,10 @@ def prepare_matrix(
     # Write detect results for sync jobs to reuse (avoids re-running detect)
     detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
     with open(detect_path, "w") as f:
-        json.dump(new_shards, f)
+        json.dump({
+            "shards": new_shards,
+            "shards_per_batch": shards_per_batch,
+        }, f)
     print(f"Detect results written to {detect_path}")
 
     matrix: list[dict] = []
@@ -422,7 +425,7 @@ def prepare_matrix(
                 "batch_index": str(i),
                 "shard_count": str(len(batch)),
                 "total_shards": str(len(s3_keys)),
-                "label": f"{entity}/{i}",
+                "label": f"{entity}-{i}",
             })
 
     return matrix
@@ -671,11 +674,19 @@ if __name__ == "__main__":
 
     elif args.command == "sync":
         new_shards = None
+        detect_batch_size = SHARDS_PER_BATCH
         if args.detect_file:
             with open(args.detect_file) as f:
-                new_shards = json.load(f)
+                detect_data = json.load(f)
+                # Support both old format (dict of lists) and new format (with metadata)
+                if isinstance(detect_data, dict) and "shards" in detect_data:
+                    new_shards = detect_data["shards"]
+                    detect_batch_size = detect_data.get("shards_per_batch", SHARDS_PER_BATCH)
+                else:
+                    new_shards = detect_data
         sync_shards(
             new_shards=new_shards,
             entity_filter=args.entity,
             batch_index=args.batch_index,
+            shards_per_batch=detect_batch_size,
         )
