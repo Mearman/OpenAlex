@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
       - run: pip install -r sync/requirements.txt
 
@@ -66,12 +66,9 @@ jobs:
             echo "has_new=false" >> $GITHUB_OUTPUT
           else
             echo "has_new=true" >> $GITHUB_OUTPUT
-            # Use EOF delimiter for multi-line matrix output
-            {
-              echo "matrix<<EOF"
-              cat sync_matrix.json
-              echo "EOF"
-            } >> $GITHUB_OUTPUT
+            echo "matrix<<GH_MATRIX_END_7k3m" >> $GITHUB_OUTPUT
+            cat sync_matrix.json >> $GITHUB_OUTPUT
+            echo "GH_MATRIX_END_7k3m" >> $GITHUB_OUTPUT
           fi
 
   # ── Sync (matrix) ────────────────────────────────────────────────────
@@ -93,7 +90,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
       - run: pip install -r sync/requirements.txt
 
