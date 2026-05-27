@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      has_new: ${{ steps.check.outputs.has_new }}
+      has_new: ${{ steps.matrix.outputs.has_new }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +60,7 @@ jobs:
     strategy:
       max-parallel: 20
       fail-fast: false
-      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
     name: sync / ${{ matrix.label }}
     steps:
       - uses: actions/checkout@v4
