@@ -428,21 +428,17 @@ SyncResult = dict  # {"entity": str, "s3_key": str, "status": str, ...}
 def sync_shards(
     new_shards: dict[str, list[str]] | None = None,
     entity_filter: str | None = None,
-    batch_index: int | None = None,
-    shards_per_batch: int = SHARDS_PER_BATCH,
 ) -> None:
     """Download, extract, and upload new shards to HuggingFace.
 
-    Overlaps download of shard N+1 with extraction of shard N using
-    a background thread. After all shards are prepared, uploads
-    everything via upload_large_folder (parallel LFS, resume support).
+    Processes ALL shards for the given entity. Overlaps download of
+    shard N+1 with extraction of shard N using a background thread.
+    Uploads periodically (every 50 shards) via upload_large_folder
+    so progress survives timeouts.
 
     Args:
         new_shards: Pre-computed detect results. If None, runs detect.
         entity_filter: Only process this entity.
-        batch_index: Only process this batch of shards (0-indexed).
-            If None, processes all shards.
-        shards_per_batch: Number of shards per batch (must match matrix).
     """
     from concurrent.futures import ThreadPoolExecutor
     from huggingface_hub import HfApi
@@ -461,14 +457,6 @@ def sync_shards(
             for s3_key in new_shards[entity]:
                 queue.append((entity, s3_key))
 
-    # Apply batch slicing
-    if batch_index is not None:
-        batch_start = batch_index * shards_per_batch
-        queue = queue[batch_start:batch_start + shards_per_batch]
-        if not queue:
-            print(f"Batch {batch_index} is empty, nothing to do")
-            return
-
     total = len(queue)
     entity_name = queue[0][0] if queue else "unknown"
     print(f"Syncing {total} shards ({entity_name})")
@@ -478,10 +466,14 @@ def sync_shards(
     upload_dir = staging_root / "upload"
     upload_dir.mkdir()
 
+    # Upload every N shards to ensure progress survives timeouts
+    UPLOAD_EVERY = 50
+
     results: list[SyncResult] = []
     succeeded = 0
     failed = 0
     processed = 0
+    uploaded_count = 0
 
     # Prefetch function runs in background thread
     def _prefetch(s3_key: str, dest: Path) -> None:
@@ -573,12 +565,36 @@ def sync_shards(
 
             results.append(result)
 
+            # Periodic upload — flush prepared files to HF every N shards
+            if succeeded > 0 and succeeded % UPLOAD_EVERY == 0:
+                print(f"Uploading batch ({succeeded} shards prepared so far)...")
+                api = HfApi()
+                try:
+                    api.upload_large_folder(
+                        folder_path=str(upload_dir),
+                        repo_id=HF_REPO_ID,
+                        repo_type="dataset",
+                        ignore_patterns=["._*"],
+                    )
+                    uploaded_count += succeeded
+                    print(f"  Batch upload complete")
+                    # Clean uploaded files from staging to free disk
+                    for p in upload_dir.rglob("*"):
+                        if p.is_file() and not p.is_symlink():
+                            p.unlink(missing_ok=True)
+                    for p in upload_dir.rglob("*"):
+                        if p.is_symlink():
+                            p.unlink(missing_ok=True)
+                except Exception as exc:
+                    print(f"  Batch upload FAILED: {exc}")
+
     finally:
         prefetch_pool.shutdown(wait=False)
 
-    # Upload all prepared files in one pass
-    if succeeded > 0:
-        print(f"Uploading {succeeded} shards to HuggingFace...")
+    # Final upload for remaining files
+    if succeeded > uploaded_count:
+        remaining = succeeded - uploaded_count
+        print(f"Uploading final batch ({remaining} shards)...")
         api = HfApi()
         t_upload = time.monotonic()
         try:
@@ -592,8 +608,7 @@ def sync_shards(
             print(f"Upload complete ({upload_elapsed:.0f}s)")
         except Exception as exc:
             print(f"Upload FAILED: {exc}")
-            # Mark all results as failed
-            for r in results:
+            for r in results[uploaded_count:]:
                 if r["status"] == "ok":
                     r["status"] = "error"
                     r["error"] = f"upload failed: {exc}"
@@ -628,6 +643,11 @@ if __name__ == "__main__":
     detect_parser = sub.add_parser("detect", help="Show new shards without syncing")
     detect_parser.add_argument("--entity", type=str, default=None)
 
+    entity_parser = sub.add_parser("detect-entities",
+        help="Detect new shards and output entity-level matrix for CI")
+    entity_parser.add_argument("--entity", type=str, default=None)
+    entity_parser.add_argument("--cache-dir", type=str, default=None)
+
     matrix_parser = sub.add_parser("prepare-matrix", help="Generate GitHub Actions matrix JSON")
     matrix_parser.add_argument("--entity", type=str, default=None)
     matrix_parser.add_argument("--shards-per-batch", type=int, default=SHARDS_PER_BATCH)
@@ -637,10 +657,6 @@ if __name__ == "__main__":
 
     sync_parser = sub.add_parser("sync", help="Download, extract, and upload new shards")
     sync_parser.add_argument("--entity", type=str, default=None)
-    sync_parser.add_argument(
-        "--batch-index", type=int, default=None,
-        help="Only process this batch (0-indexed)",
-    )
     sync_parser.add_argument(
         "--detect-file", type=str, default=None,
         help="Load detect results from this file instead of re-running detect",
@@ -661,6 +677,45 @@ if __name__ == "__main__":
                     print(f"    {k}")
                 if len(keys) > 5:
                     print(f"    ... and {len(keys) - 5} more")
+
+    elif args.command == "detect-entities":
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
+        new_shards = detect_new_shards(entity_filter=args.entity, cache_dir=cache_dir)
+
+        # Write detect results for sync jobs
+        detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
+        with open(detect_path, "w") as f:
+            json.dump({"shards": new_shards}, f)
+        print(f"Detect results written to {detect_path}")
+
+        # Build entity-level matrix
+        entity_entries = [
+            {"entity": entity}
+            for entity, keys in new_shards.items()
+            if keys
+        ]
+        matrix_json = json.dumps({"include": entity_entries}, separators=(',', ':'))
+
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if github_output:
+            with open(github_output, "a") as f:
+                if entity_entries:
+                    f.write("has_new=true\n")
+                    f.write(f"matrix={matrix_json}\n")
+                else:
+                    f.write("has_new=false\n")
+                    f.write("matrix={\"include\":[]}\n")
+        else:
+            print(matrix_json)
+
+        if entity_entries:
+            total = sum(len(v) for v in new_shards.values())
+            print(f"Entities with new shards: {len(entity_entries)}")
+            for entity, keys in new_shards.items():
+                print(f"  {entity}: {len(keys)} shards")
+            print(f"Total: {total} shards across {len(entity_entries)} entities")
+        else:
+            print("No new shards")
 
     elif args.command == "prepare-matrix":
         cache_dir = Path(args.cache_dir) if args.cache_dir else None
@@ -686,19 +741,14 @@ if __name__ == "__main__":
 
     elif args.command == "sync":
         new_shards = None
-        detect_batch_size = SHARDS_PER_BATCH
         if args.detect_file:
             with open(args.detect_file) as f:
                 detect_data = json.load(f)
-                # Support both old format (dict of lists) and new format (with metadata)
                 if isinstance(detect_data, dict) and "shards" in detect_data:
                     new_shards = detect_data["shards"]
-                    detect_batch_size = detect_data.get("shards_per_batch", SHARDS_PER_BATCH)
                 else:
                     new_shards = detect_data
         sync_shards(
             new_shards=new_shards,
             entity_filter=args.entity,
-            batch_index=args.batch_index,
-            shards_per_batch=detect_batch_size,
         )

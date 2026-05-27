@@ -9,10 +9,6 @@ on:
         description: 'Entity to sync (empty = all)'
         required: false
         default: ''
-      shards-per-batch:
-        description: 'Shards per matrix entry (default 200)'
-        required: false
-        default: '200'
 
 concurrency:
   group: sync-openalex
@@ -20,15 +16,15 @@ concurrency:
 
 jobs:
   # ── Detect ───────────────────────────────────────────────────────────
-  # Runs once. Generates the dynamic matrix for parallel sync jobs.
-  # If no new shards, the sync job is skipped entirely.
+  # Runs once. Finds entities with new/incomplete shards.
+  # Outputs entity list as a matrix for per-entity sync jobs.
 
   detect:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      has_new: ${{ steps.matrix.outputs.has_new }}
-      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_new: ${{ steps.detect.outputs.has_new }}
+      matrix: ${{ steps.detect.outputs.matrix }}
     steps:
       - uses: actions/checkout@v6
 
@@ -48,19 +44,18 @@ jobs:
           restore-keys: |
             hf-listings-${{ github.event.inputs.entity || 'all' }}-
 
-      - name: Generate sync matrix
-        id: matrix
+      - name: Detect new shards
+        id: detect
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          ARGS="--cache-dir .cache/hf-listings"
+          ENTITY_ARG=""
           if [ -n "${{ github.event.inputs.entity }}" ]; then
-            ARGS="$ARGS --entity ${{ github.event.inputs.entity }}"
+            ENTITY_ARG="--entity ${{ github.event.inputs.entity }}"
           fi
-          if [ -n "${{ github.event.inputs.shards-per-batch }}" ]; then
-            ARGS="$ARGS --shards-per-batch ${{ github.event.inputs.shards-per-batch }}"
-          fi
-          python3 -m sync.ci_sync prepare-matrix $ARGS
+          python3 -m sync.ci_sync detect-entities \
+            --cache-dir .cache/hf-listings \
+            $ENTITY_ARG
 
       - name: Save HF listing cache
         if: always()
@@ -76,20 +71,22 @@ jobs:
           path: detect_results.json
           retention-days: 1
 
-  # ── Sync (matrix) ────────────────────────────────────────────────────
-  # Each matrix entry processes a slice: (entity, batch).
-  # Runs in parallel up to max-parallel jobs.
+  # ── Sync (per-entity matrix) ─────────────────────────────────────────
+  # Each matrix entry is one entity. The job handles ALL of that entity's
+  # shards internally — download, extract, upload — with periodic commits
+  # so progress survives timeouts. Completeness-aware detect means the
+  # next run picks up any shards that weren't finished.
 
   sync:
     needs: detect
     if: needs.detect.outputs.has_new == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       max-parallel: 10
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
-    name: sync / ${{ matrix.label }}
+    name: sync / ${{ matrix.entity }}
     steps:
       - uses: actions/checkout@v6
 
@@ -105,26 +102,25 @@ jobs:
         with:
           name: detect-results
 
-      - name: Sync ${{ matrix.label }}
+      - name: Sync ${{ matrix.entity }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           python3 -m sync.ci_sync sync \
             --entity "${{ matrix.entity }}" \
-            --batch-index "${{ matrix.batch_index }}" \
             --detect-file detect_results.json
 
       - name: Upload sync results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: sync-results-${{ matrix.label }}
+          name: sync-results-${{ matrix.entity }}
           path: sync_results.jsonl
           retention-days: 30
           if-no-files-found: ignore
 
   # ── Aggregate results ────────────────────────────────────────────────
-  # Collects all per-job results into a single summary.
+  # Collects all per-entity results into a single summary.
 
   report:
     needs: sync
