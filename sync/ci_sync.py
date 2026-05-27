@@ -10,6 +10,9 @@ per-shard error isolation, retries, timeouts, and structured result logging.
 """
 from __future__ import annotations
 
+import os
+os.environ.setdefault("TQDM_DISABLE", "1")
+
 import json
 import logging
 import shutil
@@ -82,19 +85,38 @@ def _list_s3_shards(entity: str) -> dict[str, dict]:
 # ── HF helpers ───────────────────────────────────────────────────────────
 
 
+def _parquet_path_key(path: str) -> str:
+    """Derive a unique key from a parquet path including relationship type.
+
+    data/works/abstracts/works__updated_date=2024-01-13__part_0000.parquet
+      → abstracts/works__updated_date=2024-01-13__part_0000
+
+    The relationship type (parent dir) is included so that parquets from
+    different relationship subdirs for the same source file produce
+    distinct keys.
+    """
+    parts = path.split("/")
+    # parts[-2] = relationship dir (e.g. "abstracts")
+    # parts[-1] = filename (e.g. "works__...__part_0000.parquet")
+    filename = parts[-1].rsplit(".", 1)[0]
+    return f"{parts[-2]}/{filename}"
+
+
 def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
     """List all files on HF for an entity in a single pass.
 
-    Returns (source_files, parquet_shard_keys) or None if listing fails.
+    Returns (source_files, parquet_rel_keys) or None if listing fails.
     - source_files: set of .jsonl.gz paths
-    - parquet_shard_keys: set of shard keys derived from .parquet filenames
+    - parquet_rel_keys: set of "{rel_type}/{shard_key}" strings — includes the
+      relationship subdirectory so parquets from different subdirs for the same
+      source file are distinct.
     """
     from huggingface_hub import HfApi
     api = HfApi()
 
     try:
         source_files: set[str] = set()
-        parquet_keys: set[str] = set()
+        parquet_rel_keys: set[str] = set()
         for item in api.list_repo_tree(
             repo_id=HF_REPO_ID,
             repo_type="dataset",
@@ -104,15 +126,11 @@ def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
             if item.path.endswith(".jsonl.gz"):
                 source_files.add(item.path)
             elif item.path.endswith(".parquet"):
-                filename = item.path.split("/")[-1]
-                key = filename.rsplit(".", 1)[0]
-                parquet_keys.add(key)
-        return source_files, parquet_keys
-    except Exception:
+                parquet_rel_keys.add(_parquet_path_key(item.path))
+        return source_files, parquet_rel_keys
+    except Exception as e:
+        log.warning("Recursive listing failed for %s: %s", entity, e)
         pass
-
-    # Fallback: shallow + per-partition approach for large entities.
-    try:
         partition_dirs: set[str] = set()
         for item in api.list_repo_tree(
             repo_id=HF_REPO_ID,
@@ -124,7 +142,7 @@ def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
                 partition_dirs.add(item.path)
 
         source_files = set()
-        parquet_keys = set()
+        parquet_rel_keys = set()
         for part_dir in partition_dirs:
             for item in api.list_repo_tree(
                 repo_id=HF_REPO_ID,
@@ -135,11 +153,10 @@ def _hf_entity_state(entity: str) -> tuple[set[str], set[str]] | None:
                 if item.path.endswith(".jsonl.gz"):
                     source_files.add(item.path)
                 elif item.path.endswith(".parquet"):
-                    filename = item.path.split("/")[-1]
-                    key = filename.rsplit(".", 1)[0]
-                    parquet_keys.add(key)
-        return source_files, parquet_keys
-    except Exception:
+                    parquet_rel_keys.add(_parquet_path_key(item.path))
+        return source_files, parquet_rel_keys
+    except Exception as e:
+        log.warning("Per-partition listing failed for %s: %s", entity, e)
         return None
 
 
@@ -284,12 +301,27 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
         if not manifest:
             manifest = _list_s3_shards(entity)
         if not manifest:
+            log.info("No manifest for %s", entity)
             continue
 
         state = _hf_entity_state(entity)
+        log.info("Entity %s: manifest=%d, state=%s", entity, len(manifest),
+                 "None" if state is None else f"(src={len(state[0])}, pq={len(state[1])})")
 
         if state is not None:
-            hf_source_files, parquet_keys = state
+            hf_source_files, parquet_rel_keys = state
+
+            # Derive expected relationship types from the parquet data.
+            # If a relationship type appears in any shard's parquets, it's
+            # expected for all shards of this entity.
+            all_rel_types = {k.split("/", 1)[0] for k in parquet_rel_keys}
+            expected_count = len(all_rel_types)
+
+            # Build shard_key → set of present rel_types
+            shard_rels: dict[str, set[str]] = {}
+            for rk in parquet_rel_keys:
+                rel, shard_key = rk.split("/", 1)
+                shard_rels.setdefault(shard_key, set()).add(rel)
 
             # First pass: find missing source files
             missing_source = []
@@ -301,11 +333,12 @@ def detect_new_shards(entity_filter: str | None = None) -> dict[str, list[str]]:
                 else:
                     has_source.append(s3_key)
 
-            # Second pass: check if existing source files have parquet extractions
+            # Second pass: check if existing source files have all parquet extractions
             missing_parquet = []
             for s3_key in has_source:
                 shard_key = _s3_key_to_shard_key(s3_key)
-                if shard_key not in parquet_keys:
+                present_rels = shard_rels.get(shard_key, set())
+                if len(present_rels) < expected_count:
                     missing_parquet.append(s3_key)
 
             new_for_entity = missing_source + missing_parquet
