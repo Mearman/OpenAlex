@@ -673,17 +673,28 @@ def sync_shards(
 
 
 def _emit_matrix(entries: list[dict]) -> None:
-    """Write matrix JSON to $GITHUB_OUTPUT or stdout."""
+    """Write matrix JSON and max_parallel to $GITHUB_OUTPUT or stdout."""
     matrix_json = json.dumps({"include": entries}, separators=(',', ':'))
+
+    # Compute dynamic parallelism:
+    # - Scale with job count: min(total, ceiling)
+    # - Cap at GitHub concurrent limit (20 for free tier)
+    # - Floor of 1
+    # - Rate-limit safe: with per-shard uploads, each job makes multiple
+    #   upload_large_folder calls. Cap keeps HF API pressure reasonable.
+    GITHUB_MAX_CONCURRENT = 20
+    max_parallel = min(len(entries), GITHUB_MAX_CONCURRENT) if entries else 1
+
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
         with open(github_output, "a") as f:
             if entries:
-                f.write(f"has_new=true\nmatrix={matrix_json}\n")
+                f.write(f"has_new=true\nmatrix={matrix_json}\nmax_parallel={max_parallel}\n")
             else:
-                f.write("has_new=false\nmatrix={\"include\":[]}\n")
+                f.write("has_new=false\nmatrix={\"include\":[]}\nmax_parallel=1\n")
     else:
         print(matrix_json)
+        print(f"max_parallel={max_parallel}")
 
 
 def _run_cli(args: argparse.Namespace) -> None:
