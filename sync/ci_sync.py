@@ -243,6 +243,7 @@ def _extract_shard(
         shutil.copy2(source_path, target)
 
         import sync.common as common
+        from sync.extract import convert_relationships
         original_snapshot = common.SNAPSHOT_DIR
         common.SNAPSHOT_DIR = tmp_dir / "data"
 
