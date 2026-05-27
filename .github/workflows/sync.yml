@@ -10,9 +10,9 @@ on:
         required: false
         default: ''
       shards-per-batch:
-        description: 'Shards per matrix entry (default 50)'
+        description: 'Shards per matrix entry (default 200)'
         required: false
-        default: '50'
+        default: '200'
 
 concurrency:
   group: sync-openalex
