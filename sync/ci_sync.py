@@ -37,9 +37,6 @@ HF_REPO_ID = "Mearman/OpenAlex"
 # so extraction may take a while. 10 minutes is generous.
 SHARD_TIMEOUT = 600
 
-# Maximum consecutive failures before aborting the sync run.
-MAX_CONSECUTIVE_FAILURES = 5
-
 # Shards per matrix entry. Larger = fewer jobs but longer per job.
 SHARDS_PER_BATCH = 200
 
@@ -240,7 +237,8 @@ def _extract_shard(
         partition_dir.mkdir(exist_ok=True)
         target = partition_dir / source_path.name
 
-        shutil.copy2(source_path, target)
+        # Symlink instead of copy — the file is read-only for extraction
+        target.symlink_to(source_path.resolve())
 
         import sync.common as common
         from sync.extract import convert_relationships
@@ -264,51 +262,6 @@ def _extract_shard(
 
         return result
 
-
-def _prepare_shard(
-    entity: str,
-    s3_key: str,
-    staging_dir: Path,
-) -> list:
-    """Download and extract a shard into staging. Returns CommitOperationAdd list."""
-    from huggingface_hub import CommitOperationAdd
-
-    hf_path = _s3_key_to_hf_path(s3_key)
-
-    # Download
-    local_gz = staging_dir / Path(s3_key).name
-    _download_shard(s3_key, local_gz)
-
-    # Rename to .jsonl.gz
-    jsonl_gz = staging_dir / (local_gz.stem + ".jsonl.gz")
-    shutil.move(str(local_gz), str(jsonl_gz))
-
-    # Extract to parquet
-    parquet_files = _extract_shard(
-        jsonl_gz, entity, staging_dir / "parquet",
-    )
-
-    # Build upload operations
-    operations: list = []
-
-    # Source file
-    operations.append(
-        CommitOperationAdd(
-            path_in_repo=hf_path,
-            path_or_fileobj=str(jsonl_gz),
-        )
-    )
-
-    for pq in parquet_files:
-        pq_rel = pq.relative_to(staging_dir / "parquet")
-        operations.append(
-            CommitOperationAdd(
-                path_in_repo=f"data/{pq_rel}",
-                path_or_fileobj=str(pq),
-            )
-        )
-
-    return operations
 
 
 # ── Detection ────────────────────────────────────────────────────────────
@@ -436,9 +389,6 @@ def prepare_matrix(
 
 SyncResult = dict  # {"entity": str, "s3_key": str, "status": str, ...}
 
-COMMIT_BATCH_SIZE = 50
-COMMIT_MAX_RETRIES = 3
-
 
 def sync_shards(
     new_shards: dict[str, list[str]] | None = None,
@@ -448,9 +398,9 @@ def sync_shards(
 ) -> None:
     """Download, extract, and upload new shards to HuggingFace.
 
-    When batch_index is provided, processes only the specified batch of
-    shards for the given entity (for matrix parallelism). Each shard gets
-    its full extraction (all relationship types).
+    Overlaps download of shard N+1 with extraction of shard N using
+    a background thread. After all shards are prepared, uploads
+    everything via upload_large_folder (parallel LFS, resume support).
 
     Args:
         new_shards: Pre-computed detect results. If None, runs detect.
@@ -459,6 +409,7 @@ def sync_shards(
             If None, processes all shards.
         shards_per_batch: Number of shards per batch (must match matrix).
     """
+    from concurrent.futures import ThreadPoolExecutor
     from huggingface_hub import HfApi
 
     if new_shards is None:
@@ -484,22 +435,33 @@ def sync_shards(
             return
 
     total = len(queue)
-    print(f"Syncing {total} shards")
+    entity_name = queue[0][0] if queue else "unknown"
+    print(f"Syncing {total} shards ({entity_name})")
 
-    api = HfApi()
+    # Staging directory for all prepared files
+    staging_root = Path(tempfile.mkdtemp(prefix="openalex-sync-"))
+    upload_dir = staging_root / "upload"
+    upload_dir.mkdir()
+
     results: list[SyncResult] = []
     succeeded = 0
     failed = 0
-    consecutive_failures = 0
     processed = 0
 
-    for batch_start in range(0, total, COMMIT_BATCH_SIZE):
-        batch = queue[batch_start:batch_start + COMMIT_BATCH_SIZE]
-        batch_ops: list = []
-        batch_staging_dirs: list[Path] = []
-        batch_results: list[SyncResult] = []
+    # Prefetch function runs in background thread
+    def _prefetch(s3_key: str, dest: Path) -> None:
+        _download_shard(s3_key, dest)
 
-        for entity, s3_key in batch:
+    # Pre-download first shard
+    first_entity, first_key = queue[0]
+    first_dest = staging_root / Path(first_key).name
+    _download_shard(first_key, first_dest)
+
+    # Use a thread pool for overlapping download of next shard
+    prefetch_pool = ThreadPoolExecutor(max_workers=1)
+
+    try:
+        for i, (entity, s3_key) in enumerate(queue):
             processed += 1
             result: SyncResult = {
                 "entity": entity,
@@ -511,25 +473,59 @@ def sync_shards(
             }
 
             t0 = time.monotonic()
+
+            # Get the downloaded file (either pre-fetched or first)
+            if i == 0:
+                local_gz = first_dest
+            else:
+                local_gz = staging_root / Path(s3_key).name
+                prefetch_future.result()  # wait for prefetch to finish
+
+            # Start prefetching next shard in background
+            prefetch_future = None
+            if i + 1 < len(queue):
+                _, next_key = queue[i + 1]
+                next_dest = staging_root / Path(next_key).name
+                prefetch_future = prefetch_pool.submit(_prefetch, next_key, next_dest)
+
             try:
-                staging = Path(tempfile.mkdtemp(prefix="openalex-sync-"))
-                ops = _prepare_shard(entity, s3_key, staging)
+                # Rename to .jsonl.gz
+                jsonl_gz = staging_root / (local_gz.stem + ".jsonl.gz")
+                if local_gz != jsonl_gz:
+                    local_gz.rename(jsonl_gz)
+
+                # Place source file in upload dir
+                hf_path = _s3_key_to_hf_path(s3_key)
+                src_upload = upload_dir / hf_path
+                src_upload.parent.mkdir(parents=True, exist_ok=True)
+                src_upload.symlink_to(jsonl_gz.resolve())
+
+                # Extract to parquet
+                parquet_files = _extract_shard(
+                    jsonl_gz, entity, staging_root / "parquet",
+                )
+
+                # Symlink parquets into upload dir
+                for pq in parquet_files:
+                    pq_rel = pq.relative_to(staging_root / "parquet")
+                    pq_upload = upload_dir / "data" / pq_rel
+                    pq_upload.parent.mkdir(parents=True, exist_ok=True)
+                    pq_upload.symlink_to(pq.resolve())
 
                 elapsed = time.monotonic() - t0
+                n_files = 1 + len(parquet_files)
                 result["status"] = "ok"
-                result["files"] = len(ops)
+                result["files"] = n_files
                 result["seconds"] = round(elapsed, 1)
                 succeeded += 1
-                consecutive_failures = 0
-
-                batch_ops.extend(ops)
-                batch_staging_dirs.append(staging)
-                batch_results.append(result)
 
                 print(
                     f"  [{processed}/{total}] prepared {s3_key} "
-                    f"({len(ops)} files, {elapsed:.0f}s)"
+                    f"({n_files} files, {elapsed:.0f}s)"
                 )
+
+                # Clean up the .gz to free disk (parquets already symlinked)
+                jsonl_gz.unlink(missing_ok=True)
 
             except Exception as exc:
                 elapsed = time.monotonic() - t0
@@ -537,65 +533,40 @@ def sync_shards(
                 result["error"] = str(exc)
                 result["seconds"] = round(elapsed, 1)
                 failed += 1
-                consecutive_failures += 1
-                batch_results.append(result)
 
                 print(f"  [{processed}/{total}] FAILED {s3_key}: {exc}")
 
-        # Commit the batch with retries
-        if batch_ops:
-            committed = False
-            for attempt in range(COMMIT_MAX_RETRIES):
-                try:
-                    api.create_commit(
-                        repo_id=HF_REPO_ID,
-                        repo_type="dataset",
-                        operations=batch_ops,
-                        commit_message=(
-                            f"feat: sync {len(batch_ops)} files "
-                            f"({entity}, batch {batch_index or 0})"
-                        ),
-                    )
-                    print(f"  Committed batch of {len(batch_ops)} files")
-                    committed = True
-                    consecutive_failures = 0
-                    break
-                except Exception as exc:
-                    exc_str = str(exc)
-                    if "429" in exc_str or "rate limit" in exc_str.lower():
-                        import re
-                        match = re.search(r"Retry after (\d+) seconds", exc_str)
-                        wait = int(match.group(1)) if match else 300
-                        wait = min(wait, 300)
-                        if attempt < COMMIT_MAX_RETRIES - 1:
-                            print(
-                                f"  Rate limited, waiting {wait}s "
-                                f"(attempt {attempt + 1}/{COMMIT_MAX_RETRIES})"
-                            )
-                            time.sleep(wait)
-                        else:
-                            print(f"  Batch commit FAILED after {COMMIT_MAX_RETRIES} retries: {exc}")
-                    else:
-                        print(f"  Batch commit FAILED: {exc}")
-                        break
+            results.append(result)
 
-            if not committed:
-                failed += len(batch_results)
-                consecutive_failures += 1
-                for r in batch_results:
-                    if r["status"] == "ok":
-                        r["status"] = "error"
-                        r["error"] = "commit failed: rate limited"
-                        succeeded -= 1
+    finally:
+        prefetch_pool.shutdown(wait=False)
 
-        results.extend(batch_results)
+    # Upload all prepared files in one pass
+    if succeeded > 0:
+        print(f"Uploading {succeeded} shards to HuggingFace...")
+        api = HfApi()
+        t_upload = time.monotonic()
+        try:
+            api.upload_large_folder(
+                folder_path=str(upload_dir),
+                repo_id=HF_REPO_ID,
+                repo_type="dataset",
+                ignore_patterns=["._*"],
+            )
+            upload_elapsed = time.monotonic() - t_upload
+            print(f"Upload complete ({upload_elapsed:.0f}s)")
+        except Exception as exc:
+            print(f"Upload FAILED: {exc}")
+            # Mark all results as failed
+            for r in results:
+                if r["status"] == "ok":
+                    r["status"] = "error"
+                    r["error"] = f"upload failed: {exc}"
+                    succeeded -= 1
+                    failed += 1
 
-        for staging in batch_staging_dirs:
-            shutil.rmtree(staging, ignore_errors=True)
-
-        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-            print(f"Aborting: {MAX_CONSECUTIVE_FAILURES} consecutive failures")
-            break
+    # Clean up
+    shutil.rmtree(staging_root, ignore_errors=True)
 
     # Write results
     results_path = Path("sync_results.jsonl")
