@@ -348,7 +348,12 @@ def _extract_shard(
 ) -> list[Path]:
     """Extract a single source shard to parquet.
 
-    Returns list of parquet file paths written.
+    Creates a minimal mock snapshot containing only this shard's source
+    file (symlinked into a temp directory). convert_relationships
+    reads from the mock, writes parquets to output_dir, and we move
+    them into the upload tree. No staging symlinks, no shutil chains.
+
+    Returns list of parquet file paths written (inside output_dir).
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
@@ -358,8 +363,6 @@ def _extract_shard(
         partition_dir = mock_data / source_path.parent.name
         partition_dir.mkdir(exist_ok=True)
         target = partition_dir / source_path.name
-
-        # Symlink instead of copy — the file is read-only for extraction
         target.symlink_to(source_path.resolve())
 
         import sync.common as common
@@ -662,27 +665,20 @@ def sync_shards(
                 if local_gz != jsonl_gz:
                     local_gz.rename(jsonl_gz)
 
-                # Place source file in upload dir
+                # Move source file directly into upload dir (no symlink)
                 hf_path = _s3_key_to_hf_path(s3_key)
-                src_upload = upload_dir / hf_path
+                src_upload = upload_dir / "data" / hf_path
                 src_upload.parent.mkdir(parents=True, exist_ok=True)
                 if src_upload.exists() or src_upload.is_symlink():
                     src_upload.unlink()
-                src_upload.symlink_to(jsonl_gz.resolve())
+                shutil.move(str(jsonl_gz), str(src_upload))
 
-                # Extract to parquet
+                # Extract — mock snapshot still needs a temp symlink for
+                # convert_relationships, but parquets move directly into
+                # the upload tree (no intermediate symlinks)
                 parquet_files = _extract_shard(
-                    jsonl_gz, entity, staging_root / "parquet",
+                    src_upload, entity, upload_dir / "data",
                 )
-
-                # Symlink parquets into upload dir
-                for pq in parquet_files:
-                    pq_rel = pq.relative_to(staging_root / "parquet")
-                    pq_upload = upload_dir / "data" / pq_rel
-                    pq_upload.parent.mkdir(parents=True, exist_ok=True)
-                    if pq_upload.exists() or pq_upload.is_symlink():
-                        pq_upload.unlink()
-                    pq_upload.symlink_to(pq.resolve())
 
                 elapsed = time.monotonic() - t0
                 n_files = 1 + len(parquet_files)
@@ -695,9 +691,6 @@ def sync_shards(
                     f"  [{processed}/{total}] prepared {s3_key} "
                     f"({n_files} files, {elapsed:.0f}s)"
                 )
-
-                # Clean up the .gz to free disk (parquets already symlinked)
-                jsonl_gz.unlink(missing_ok=True)
 
             except Exception as exc:
                 elapsed = time.monotonic() - t0
@@ -723,13 +716,17 @@ def sync_shards(
                     )
                     uploaded_count = succeeded
                     print("  Batch upload complete")
-                    # Clean uploaded files from staging to free disk
+                    # Clean uploaded files from upload dir to free disk
                     for p in upload_dir.rglob("*"):
-                        if p.is_file() and not p.is_symlink():
+                        if p.is_file():
                             p.unlink(missing_ok=True)
-                    for p in upload_dir.rglob("*"):
-                        if p.is_symlink():
-                            p.unlink(missing_ok=True)
+                    # Remove empty directories
+                    for p in sorted(upload_dir.rglob("*"), reverse=True):
+                        if p.is_dir():
+                            try:
+                                p.rmdir()
+                            except OSError:
+                                pass
                 except Exception as exc:
                     print(f"  Batch upload FAILED: {exc}")
 
