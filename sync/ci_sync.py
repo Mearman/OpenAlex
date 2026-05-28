@@ -607,8 +607,11 @@ def sync_shards(
     upload_dir = staging_root / "upload"
     upload_dir.mkdir()
 
-    # Upload every N shards to ensure progress survives timeouts
-    UPLOAD_EVERY = 50
+    # Upload after each shard to keep disk bounded.
+    # Previous batching (every 50) caused disk exhaustion on large
+    # entities like works, where source files + parquets accumulate
+    # to many GB before the upload cycle triggers.
+    UPLOAD_EVERY = 1
 
     results: list[SyncResult] = []
     succeeded = 0
