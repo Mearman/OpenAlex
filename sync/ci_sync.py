@@ -419,7 +419,11 @@ def detect_new_shards(
             hf_source_files, parquet_rel_keys = state
 
             all_rel_types = {k.split("/", 1)[0] for k in parquet_rel_keys}
-            expected_count = len(all_rel_types)
+            # Use the known relationship type count for this entity, not
+            # what's currently on HF. Deriving from HF means a shard
+            # with only 10 of 18 rel types looks "complete" if those
+            # 10 are the only rel types on HF — a false negative.
+            expected_count = _ENTITY_REL_COUNTS.get(entity, len(all_rel_types))
 
             shard_rels: dict[str, set[str]] = {}
             for rk in parquet_rel_keys:
@@ -441,6 +445,18 @@ def detect_new_shards(
                 present_rels = shard_rels.get(shard_key, set())
                 if len(present_rels) < expected_count:
                     missing_parquet.append(s3_key)
+                    log.debug(
+                        "Shard %s: %d/%d rel types present",
+                        shard_key, len(present_rels), expected_count,
+                    )
+                    missing_parquet.append(s3_key)
+
+            log.info(
+                "Entity %s: %d missing source, %d incomplete parquet "
+                "(expected %d rel types, found %d on HF)",
+                entity, len(missing_source), len(missing_parquet),
+                expected_count, len(all_rel_types),
+            )
 
             new_for_entity = missing_source + missing_parquet
         else:
