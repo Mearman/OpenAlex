@@ -85,6 +85,47 @@ def _shards_per_job_for_entity(entity: str, total_shards: int) -> int:
     return min(scaled, total_shards)
 
 
+def _size_aware_batch(
+    keys: list[str],
+    sizes: dict[str, int],
+    max_batches: int,
+    rel_count: int = 1,
+) -> list[list[str]]:
+    """Split keys into batches balanced by total shard size.
+
+    Uses a greedy largest-fit algorithm: sorts shards by size descending,
+    then assigns each to the batch with the smallest current total. This
+    produces batches with roughly equal total byte size, so no single
+    batch disproportionately contains all the large partitions.
+
+    Falls back to positional slicing when sizes are unavailable.
+    """
+    if not keys:
+        return []
+
+    has_sizes = any(sizes.get(k, 0) > 0 for k in keys)
+
+    if not has_sizes:
+        # No size data — fall back to positional slicing
+        n = -(-len(keys) // max(1, -(-len(keys) // max_batches)))
+        return [keys[i:i + n] for i in range(0, len(keys), n)]
+
+    # Sort by size descending (greedy: assign largest first)
+    sorted_keys = sorted(keys, key=lambda k: sizes.get(k, 0), reverse=True)
+
+    batches: list[list[str]] = [[] for _ in range(max_batches)]
+    batch_totals: list[int] = [0] * max_batches
+
+    for key in sorted_keys:
+        size = sizes.get(key, 0)
+        # Find the batch with the smallest total
+        min_idx = batch_totals.index(min(batch_totals))
+        batches[min_idx].append(key)
+        batch_totals[min_idx] += size
+
+    return batches
+
+
 def _entity_rel_types(entity: str) -> list[str] | None:
     """Get relationship type names for an entity.
 
@@ -106,7 +147,7 @@ def _s3_client():
 
 
 def _fetch_manifest(entity: str) -> dict[str, dict]:
-    """Fetch S3 manifest for an entity. Returns {s3_key: meta}."""
+    """Fetch S3 manifest for an entity. Returns {s3_key: {"size": int}}."""
     s3 = _s3_client()
     try:
         obj = s3.get_object(Bucket=S3_BUCKET, Key=f"data/{entity}/manifest")
@@ -118,7 +159,14 @@ def _fetch_manifest(entity: str) -> dict[str, dict]:
         url: str = entry.get("url", "")
         if url.startswith(f"s3://{S3_BUCKET}/"):
             key = url[len(f"s3://{S3_BUCKET}/"):]
-            entries[key] = entry.get("meta", {})
+            meta = entry.get("meta", {})
+            record: dict = {}
+            # OpenAlex manifests include record_count in meta
+            if isinstance(meta, dict):
+                count = meta.get("record_count") or meta.get("content_length")
+                if count is not None:
+                    record["size"] = int(count)
+            entries[key] = record
     return entries
 
 
@@ -132,7 +180,7 @@ def _list_s3_shards(entity: str) -> dict[str, dict]:
         for obj in page.get("Contents", []):
             key: str = obj["Key"]
             if key.endswith(".gz") and not key.endswith(".jsonl.gz"):
-                entries[key] = {}
+                entries[key] = {"size": obj.get("Size", 0)}
     return entries
 
 
@@ -322,14 +370,16 @@ def _extract_shard(
 def detect_new_shards(
     entity_filter: str | None = None,
     cache_dir: Path | None = None,
-) -> dict[str, list[str]]:
+) -> tuple[dict[str, list[str]], dict[str, int]]:
     """Compare S3 manifests against HF to find shards needing sync.
 
     A shard needs syncing if either:
     1. Its source .jsonl.gz file is not on HF, OR
     2. Its source file is on HF but its parquet extractions are incomplete
 
-    Returns {entity: [s3_key, ...]} for each entity with gaps.
+    Returns (new_shards, shard_sizes) where:
+      new_shards: {entity: [s3_key, ...]} for each entity with gaps
+      shard_sizes: {s3_key: size_in_bytes} from manifest or S3 listing
     """
     from huggingface_hub import HfApi
     api = HfApi()
@@ -338,6 +388,7 @@ def detect_new_shards(
         [entity_filter] if entity_filter else ENTITY_TYPES_BUILD_ORDER
     )
     new_shards: dict[str, list[str]] = {}
+    shard_sizes: dict[str, int] = {}
 
     for entity in entities:
         manifest = _fetch_manifest(entity)
@@ -346,6 +397,11 @@ def detect_new_shards(
         if not manifest:
             log.info("No manifest for %s", entity)
             continue
+
+        # Extract sizes from manifest metadata
+        for s3_key, meta in manifest.items():
+            if isinstance(meta, dict) and "size" in meta:
+                shard_sizes[s3_key] = meta["size"]
 
         state = _hf_entity_state(entity, cache_dir=cache_dir)
         log.info("Entity %s: manifest=%d, state=%s", entity, len(manifest),
@@ -389,7 +445,7 @@ def detect_new_shards(
         if new_for_entity:
             new_shards[entity] = new_for_entity
 
-    return new_shards
+    return new_shards, shard_sizes
 
 
 # ── Matrix generation ────────────────────────────────────────────────────
@@ -409,7 +465,7 @@ def prepare_matrix(
 
     Returns list of matrix entries (dicts with string values).
     """
-    new_shards = detect_new_shards(entity_filter=entity_filter, cache_dir=cache_dir)
+    new_shards, shard_sizes = detect_new_shards(entity_filter=entity_filter, cache_dir=cache_dir)
 
     if not new_shards:
         return []
@@ -449,6 +505,7 @@ def sync_shards(
     entity_filter: str | None = None,
     batch: int | None = None,
     shards_per_job: int | None = None,
+    batch_keys: dict[str, list[str]] | None = None,
 ) -> None:
     """Download, extract, and upload new shards to HuggingFace.
 
@@ -470,7 +527,7 @@ def sync_shards(
     from huggingface_hub import HfApi
 
     if new_shards is None:
-        new_shards = detect_new_shards(entity_filter=entity_filter, cache_dir=None)
+        new_shards, _ = detect_new_shards(entity_filter=entity_filter, cache_dir=None)
 
     if not new_shards:
         print("No new shards to sync")
@@ -478,13 +535,20 @@ def sync_shards(
 
     # Flatten to ordered list of (entity, s3_key) pairs
     queue: list[tuple[str, str]] = []
-    for entity in ENTITY_TYPES_BUILD_ORDER:
-        if entity in new_shards:
-            for s3_key in new_shards[entity]:
-                queue.append((entity, s3_key))
+    if batch_keys:
+        # Use pre-computed batch assignments from detect results
+        for entity in ENTITY_TYPES_BUILD_ORDER:
+            if entity in batch_keys:
+                for s3_key in batch_keys[entity]:
+                    queue.append((entity, s3_key))
+    else:
+        for entity in ENTITY_TYPES_BUILD_ORDER:
+            if entity in new_shards:
+                for s3_key in new_shards[entity]:
+                    queue.append((entity, s3_key))
 
-    # Apply batch slicing for large entities
-    if batch is not None:
+    # Apply batch slicing for large entities (only when no batch_keys)
+    if batch is not None and not batch_keys:
         entity_name_for_batch = queue[0][0] if queue else "works"
         spj = _shards_per_job_for_entity(entity_name_for_batch, len(queue))
         batch_start = batch * spj
@@ -700,7 +764,7 @@ def _emit_matrix(entries: list[dict]) -> None:
 def _run_cli(args: argparse.Namespace) -> None:
     """Dispatch parsed CLI arguments."""
     if args.command == "detect":
-        shards_found = detect_new_shards(entity_filter=args.entity)
+        shards_found, _ = detect_new_shards(entity_filter=args.entity)
         if not shards_found:
             print("No new shards")
         else:
@@ -715,29 +779,42 @@ def _run_cli(args: argparse.Namespace) -> None:
 
     elif args.command == "detect-entities":
         cache_dir = Path(args.cache_dir) if args.cache_dir else None
-        new_shards = detect_new_shards(entity_filter=args.entity, cache_dir=cache_dir)
+        new_shards, shard_sizes = detect_new_shards(entity_filter=args.entity, cache_dir=cache_dir)
 
         detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
-        with open(detect_path, "w") as f:
-            json.dump({"shards": new_shards}, f)
-        print(f"Detect results written to {detect_path}")
-
-        # Build matrix: weighted by relationship type count per entity
-        entries: list[dict] = []
+        # Build batches first so we can store assignments in detect results
+        batch_map: dict[str, list[list[str]]] = {}  # entity → [batch0_keys, batch1_keys, ...]
         for entity, keys in new_shards.items():
             if not keys:
+                batch_map[entity] = []
                 continue
             spj = _shards_per_job_for_entity(entity, len(keys))
-            n_batches = -(-len(keys) // spj)  # ceil div
-            if n_batches == 1:
+            n_batches = -(-len(keys) // spj)
+            if n_batches <= 1:
+                batch_map[entity] = [keys]
+            else:
+                rel_count = _ENTITY_REL_COUNTS.get(entity, 1)
+                batch_map[entity] = _size_aware_batch(keys, shard_sizes, n_batches, rel_count)
+
+        with open(detect_path, "w") as f:
+            json.dump({"shards": new_shards, "batches": batch_map}, f)
+        print(f"Detect results written to {detect_path}")
+
+        # Build matrix entries from batch assignments
+        entries: list[dict] = []
+        for entity, batches in batch_map.items():
+            if not batches:
+                continue
+            if len(batches) == 1:
                 entries.append({"entity": entity, "batch": "0", "label": entity})
             else:
-                for i in range(n_batches):
-                    entries.append({
-                        "entity": entity,
-                        "batch": str(i),
-                        "label": f"{entity}-{i}",
-                    })
+                for i, batch in enumerate(batches):
+                    if batch:
+                        entries.append({
+                            "entity": entity,
+                            "batch": str(i),
+                            "label": f"{entity}-{i}",
+                        })
 
         _emit_matrix(entries)
 
@@ -747,7 +824,9 @@ def _run_cli(args: argparse.Namespace) -> None:
             for entity, keys in new_shards.items():
                 spj = _shards_per_job_for_entity(entity, len(keys))
                 n = -(-len(keys) // spj)
-                print(f"  {entity}: {len(keys)} shards, {spj}/batch → {n} job(s)")
+                has_sizes = any(shard_sizes.get(k, 0) > 0 for k in keys)
+                size_note = "size-aware" if has_sizes else "positional"
+                print(f"  {entity}: {len(keys)} shards, {spj}/batch → {n} job(s) ({size_note})")
             print(f"Total: {total} shards across {len(new_shards)} entities")
         else:
             print("No new shards")
