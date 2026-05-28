@@ -1,0 +1,1229 @@
+"""Schema-driven relationship extraction for OpenAlex entities.
+
+Replaces per-entity extraction functions with a single generic extractor
+parameterised by a schema inferred from sample data. The schema declares
+which JSON fields to extract and which pattern to apply; the pattern
+interpreter does the rest.
+
+Entities and relationship types are discovered automatically — no
+per-entity code is needed. New entities appearing in the OpenAlex
+snapshot get picked up without changes to this module.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from sync.extract import extract_id
+
+log = logging.getLogger(__name__)
+
+# ── Entity → singular mapping ──────────────────────────────────────────
+# Used for column naming: works → work_id, institutions → institution_id.
+# Most follow a simple rule but some don't.
+
+_ENTITY_SINGULAR: dict[str, str] = {
+    "works": "work",
+    "authors": "author",
+    "sources": "source",
+    "institutions": "institution",
+    "publishers": "publisher",
+    "funders": "funder",
+    "concepts": "concept",
+    "topics": "topic",
+    "subfields": "subfield",
+    "fields": "field",
+    "domains": "domain",
+    "sdgs": "sdg",
+    "awards": "award",
+    "continents": "continent",
+    "countries": "country",
+}
+
+
+def _singular(entity: str) -> str:
+    """Entity plural → singular for column naming."""
+    if entity in _ENTITY_SINGULAR:
+        return _ENTITY_SINGULAR[entity]
+    # Fallback: strip trailing 's' (works for most cases)
+    if entity.endswith("s") and not entity.endswith("ss"):
+        return entity[:-1]
+    return entity
+
+
+# ── Skip rules ──────────────────────────────────────────────────────────
+# Fields that are NOT extracted as relationship tables.
+
+_SKIP_FIELDS: frozenset[str] = frozenset({
+    # Scalar metadata wrappers
+    "summary_stats",
+    "geo",
+    "biblio",
+    "open_access",
+    "citation_normalized_percentile",
+    "cited_by_percentile_year",
+    "has_content",
+    # Singular versions of arrays (primary/best)
+    "primary_location",
+    "best_oa_location",
+    "primary_topic",
+})
+
+_SKIP_NESTED_KEYS: frozenset[str] = frozenset({
+    # Inside authorships/investigators — not useful as separate tables
+    "raw_affiliation_strings",
+    "raw_author_name",
+    "countries",
+    "landing_page_url",
+    "provenance",
+})
+
+# String list fields that ARE extracted (by field name suffix/pattern)
+_STRING_LIST_PATTERNS: frozenset[str] = frozenset({
+    "alternatives",
+    "alternate_titles",
+    "acronyms",
+    "codes",
+})
+
+# JSON key → relationship name overrides.
+# The probe derives rel_name from the JSON key by default, but the
+# hardcoded extractors used different names for some fields. This
+# mapping preserves naming compatibility with existing parquet data.
+_REL_NAME_OVERRIDES: dict[str, dict[str, str]] = {
+    "institutions": {
+        "associated_institutions": "institution_associations",
+    },
+    "sources": {
+        "host_organization_lineage": "source_host_lineage",
+    },
+    "authors": {
+        "x_concepts": "author_concepts",
+        "affiliations": "author_institutions",
+        "last_known_institutions": "author_last_known_institutions",
+        "topic_share": "author_topic_share",
+        "sources": "author_sources",
+    },
+    "works": {
+        "authorships": "work_authorships",
+        "authorships_institutions": "work_authorship_institutions",
+        "sustainable_development_goals": "work_sdgs",
+        "grants": "work_funders",
+        "awards": "work_awards",
+        "locations": "work_locations",
+        "referenced_works": "work_references",
+        "related_works": "work_related",
+        "corresponding_author_ids": "work_corresponding_authors",
+        "corresponding_institution_ids": "work_corresponding_institutions",
+    },
+}
+
+
+def _rel_name(entity: str, json_key: str, default: str) -> str:
+    """Apply naming override if one exists, else use the default."""
+    overrides = _REL_NAME_OVERRIDES.get(entity, {})
+    return overrides.get(json_key, default)
+
+
+# ── Schema types ────────────────────────────────────────────────────────
+
+
+@dataclass
+class FieldSchema:
+    """Schema for one extractable field in an entity record.
+
+    Attributes:
+        json_key: Key in the JSON record (e.g. "authorships", "topics")
+        pattern: Extraction pattern name (e.g. "id_ref", "url_list")
+        rel_name: Output relationship table name (e.g. "work_authorships")
+        id_path: Dot-path to the ID within each element (e.g. "author.id")
+        extra_cols: Scalar fields to carry as columns (e.g. ["score", "count"])
+        nested: Sub-array schemas for nested extraction
+        col_renames: Rename columns from JSON key → parquet column
+        is_singular_dict: True if the JSON value is a single dict, not an array
+    """
+
+    json_key: str
+    pattern: str
+    rel_name: str
+    id_path: str | None = None
+    extra_cols: list[str] = field(default_factory=list)
+    nested: list[FieldSchema] = field(default_factory=list)
+    col_renames: dict[str, str] = field(default_factory=dict)
+    is_singular_dict: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "json_key": self.json_key,
+            "pattern": self.pattern,
+            "rel_name": self.rel_name,
+        }
+        if self.id_path:
+            d["id_path"] = self.id_path
+        if self.extra_cols:
+            d["extra_cols"] = self.extra_cols
+        if self.nested:
+            d["nested"] = [n.to_dict() for n in self.nested]
+        if self.col_renames:
+            d["col_renames"] = self.col_renames
+        if self.is_singular_dict:
+            d["is_singular_dict"] = True
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FieldSchema:
+        return cls(
+            json_key=d["json_key"],
+            pattern=d["pattern"],
+            rel_name=d["rel_name"],
+            id_path=d.get("id_path"),
+            extra_cols=d.get("extra_cols", []),
+            nested=[cls.from_dict(n) for n in d.get("nested", [])],
+            col_renames=d.get("col_renames", {}),
+            is_singular_dict=d.get("is_singular_dict", False),
+        )
+
+
+@dataclass
+class EntitySchema:
+    """Schema for one entity type.
+
+    Attributes:
+        entity: Entity name (e.g. "works")
+        id_col: Column name for the entity ID (e.g. "work_id")
+        id_path: Dot-path to the entity's own ID in the record (e.g. "id")
+        fields: Schemas for extractable fields
+    """
+
+    entity: str
+    id_col: str
+    id_path: str
+    fields: list[FieldSchema] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "entity": self.entity,
+            "id_col": self.id_col,
+            "id_path": self.id_path,
+            "fields": [f.to_dict() for f in self.fields],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> EntitySchema:
+        return cls(
+            entity=d["entity"],
+            id_col=d["id_col"],
+            id_path=d.get("id_path", "id"),
+            fields=[FieldSchema.from_dict(f) for f in d.get("fields", [])],
+        )
+
+    def rel_type_names(self) -> frozenset[str]:
+        """All relationship type names produced by this schema."""
+        names: set[str] = set()
+        for f in self.fields:
+            names.add(f.rel_name)
+            for n in f.nested:
+                names.add(n.rel_name)
+        return frozenset(names)
+
+
+# ── Pattern interpreter ────────────────────────────────────────────────
+
+
+def _resolve_nested(obj: dict, path: str) -> Any:
+    """Resolve a dot-path like 'author.id' from a dict."""
+    parts = path.split(".")
+    current: Any = obj
+    for part in parts:
+        if isinstance(current, dict):
+            current = current.get(part)
+        else:
+            return None
+    return current
+
+
+def _pattern_url_list(
+    entity_id: int,
+    items: list[Any],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: list of OpenAlex URL strings → {entity}_id + {target}_id."""
+    target_name = fs.json_key
+    # Derive target column name from the relationship name
+    # e.g. "work_references" → "referenced_work_id"
+    # "source_host_lineage" → "publisher_id"
+    rows: list[dict] = []
+    for url in items:
+        target_id = extract_id(url)
+        if target_id is not None:
+            rows.append({entity_id_col: entity_id, target_name + "_id": target_id})
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_id_ref(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: list of dicts with an ID field + optional scalar fields."""
+    id_path = fs.id_path or "id"
+    rows: list[dict] = []
+    for item in items:
+        target_id = extract_id(_resolve_nested(item, id_path))
+        if target_id is None:
+            continue
+        row: dict[str, Any] = {entity_id_col: entity_id}
+        # Derive target column from id_path leaf
+        id_leaf = id_path.rsplit(".", 1)[-1]
+        target_col = id_leaf + "_id" if id_leaf != "id" else fs.json_key.rstrip("s") + "_id"
+        row[target_col] = target_id
+        for col in fs.extra_cols:
+            val = item.get(col)
+            if val is not None:
+                if isinstance(val, float):
+                    row[col] = val
+                elif isinstance(val, int):
+                    row[col] = val
+                elif isinstance(val, bool):
+                    row[col] = val
+                else:
+                    row[col] = val
+        rows.append(row)
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_nested_id_ref(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: list of dicts with an ID field, scalar extras, and
+    sub-arrays that themselves produce relationship tables.
+
+    The parent element's ID is threaded into nested rows so they can
+    be joined back.
+    """
+    id_path = fs.id_path or "id"
+    result: dict[str, list[dict]] = {}
+    parent_rows: list[dict] = []
+
+    for item in items:
+        target_id = extract_id(_resolve_nested(item, id_path))
+        if target_id is None:
+            continue
+        row: dict[str, Any] = {entity_id_col: entity_id}
+        id_leaf = id_path.rsplit(".", 1)[-1]
+        target_col = id_leaf + "_id" if id_leaf != "id" else fs.json_key.rstrip("s") + "_id"
+        row[target_col] = target_id
+        for col in fs.extra_cols:
+            val = item.get(col)
+            if val is not None:
+                row[col] = val
+        parent_rows.append(row)
+
+        # Extract nested sub-arrays
+        for nested_fs in fs.nested:
+            sub_items = item.get(nested_fs.json_key)
+            if not sub_items or not isinstance(sub_items, list):
+                continue
+            nested_id_path = nested_fs.id_path or "id"
+            for sub in sub_items:
+                sub_id = extract_id(_resolve_nested(sub, nested_id_path))
+                if sub_id is None:
+                    continue
+                nrow: dict[str, Any] = {entity_id_col: entity_id}
+                # Thread the parent target ID for join-back
+                nrow[target_col] = target_id
+                sub_leaf = nested_id_path.rsplit(".", 1)[-1]
+                sub_col = sub_leaf + "_id" if sub_leaf != "id" else nested_fs.json_key.rstrip("s") + "_id"
+                nrow[sub_col] = sub_id
+                for col in nested_fs.extra_cols:
+                    val = sub.get(col)
+                    if val is not None:
+                        nrow[col] = val
+                result.setdefault(nested_fs.rel_name, []).append(nrow)
+
+    if parent_rows:
+        result[fs.rel_name] = parent_rows
+    return result
+
+
+def _pattern_time_series(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: list of dicts with 'year' + numeric fields."""
+    rows: list[dict] = []
+    for item in items:
+        year = item.get("year")
+        if year is None:
+            continue
+        row: dict[str, Any] = {entity_id_col: entity_id, "year": int(year)}
+        for col in fs.extra_cols:
+            val = item.get(col, 0)
+            if isinstance(val, (int, float)):
+                row[col] = int(val) if col != "score" else float(val)
+            else:
+                row[col] = 0
+        rows.append(row)
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_external_ids(
+    entity_id: int,
+    items: dict[str, Any],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: dict of {source: value} → {entity}_id, source, value."""
+    rows: list[dict] = []
+    for source, value in items.items():
+        # Skip non-scalar values (issn is an array, handled separately)
+        if isinstance(value, (list, dict)):
+            continue
+        if value:
+            rows.append({
+                entity_id_col: entity_id,
+                "source": source,
+                "value": str(value),
+            })
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_string_list(
+    entity_id: int,
+    items: list[Any],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: list of strings → {entity}_id, value."""
+    col_name = fs.col_renames.get("value", fs.json_key.rstrip("s"))
+    rows: list[dict] = []
+    for val in items:
+        if val and isinstance(val, str):
+            rows.append({entity_id_col: entity_id, col_name: val})
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_json_blob(
+    entity_id: int,
+    items: dict[str, Any],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: dict serialised as JSON string → one row per record."""
+    blob = json.dumps(items, separators=(",", ":"))
+    return {fs.rel_name: [{entity_id_col: entity_id, fs.json_key: blob}]}
+
+
+def _pattern_roles(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: list of role dicts with id, role, works_count."""
+    _ROLE_PREFIX: dict[str, str] = {
+        "funder": "F",
+        "publisher": "P",
+        "institution": "I",
+    }
+    rows: list[dict] = []
+    for role in items:
+        role_id = extract_id(role.get("id"))
+        role_type = role.get("role")
+        if role_id is not None and role_type:
+            rows.append({
+                entity_id_col: entity_id,
+                "role_entity_id": role_id,
+                "role_type": role_type,
+                "role_prefix": _ROLE_PREFIX.get(role_type, ""),
+            })
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_topic_share(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: list of dicts with id + value → topic_id, value."""
+    rows: list[dict] = []
+    for item in items:
+        topic_id = extract_id(item.get("id"))
+        if topic_id is not None:
+            rows.append({
+                entity_id_col: entity_id,
+                "topic_id": topic_id,
+                "value": float(item.get("value", 0.0)),
+            })
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_taxonomy_parent(
+    entity_id: int,
+    item: dict,
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: single dict with id → {entity}_id + {parent}_id."""
+    id_path = fs.id_path or "id"
+    parent_id = extract_id(_resolve_nested(item, id_path))
+    if parent_id is None:
+        return {}
+    # Derive target column from the json_key
+    target_col = fs.json_key + "_id"
+    return {fs.rel_name: [{entity_id_col: entity_id, target_col: parent_id}]}
+
+
+def _pattern_grants(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: grants array with funder URL string + award_id."""
+    rows: list[dict] = []
+    for grant in items:
+        funder_id = extract_id(grant.get("funder"))
+        if funder_id is not None:
+            row: dict[str, Any] = {
+                entity_id_col: entity_id,
+                "funder_id": funder_id,
+            }
+            award_id = grant.get("award_id")
+            if award_id is not None:
+                row["award_id"] = award_id
+            rows.append(row)
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_mesh(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: MeSH terms with descriptor_ui, not OpenAlex IDs."""
+    rows: list[dict] = []
+    for mesh in items:
+        descriptor_ui = mesh.get("descriptor_ui")
+        if descriptor_ui:
+            rows.append({
+                entity_id_col: entity_id,
+                "descriptor_ui": descriptor_ui,
+                "descriptor_name": mesh.get("descriptor_name"),
+                "qualifier_ui": mesh.get("qualifier_ui"),
+                "qualifier_name": mesh.get("qualifier_name"),
+                "is_major_topic": bool(mesh.get("is_major_topic", False)),
+            })
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_investigators(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: investigator dicts with optional nested affiliation."""
+    result: dict[str, list[dict]] = {}
+
+    # Handle lead/co_lead as single dicts (not arrays)
+    if fs.is_singular_dict:
+        items = [items] if isinstance(items, dict) else []
+
+    for inv in items:
+        if not isinstance(inv, dict) or not inv:
+            continue
+        aff = inv.get("affiliation")
+        aff_name = None
+        aff_country = None
+        aff_id_rows: list[dict] = []
+
+        if isinstance(aff, dict):
+            aff_name = aff.get("name")
+            aff_country = aff.get("country")
+            for aid in (aff.get("ids") or []):
+                if isinstance(aid, dict):
+                    aff_id_rows.append({
+                        entity_id_col: entity_id,
+                        "investigator_orcid": inv.get("orcid"),
+                        "investigator_family_name": inv.get("family_name"),
+                        "affiliation_id": aid.get("id"),
+                        "affiliation_type": aid.get("type"),
+                        "asserted_by": aid.get("asserted_by"),
+                    })
+        elif isinstance(aff, str):
+            aff_name = aff
+
+        result.setdefault(fs.rel_name, []).append({
+            entity_id_col: entity_id,
+            "given_name": inv.get("given_name"),
+            "family_name": inv.get("family_name"),
+            "orcid": inv.get("orcid"),
+            "affiliation_name": aff_name,
+            "affiliation_country": aff_country,
+            "role_start": inv.get("role_start"),
+            "is_lead": fs.col_renames.get("is_lead", False),
+            "is_co_lead": fs.col_renames.get("is_co_lead", False),
+        })
+
+        if aff_id_rows:
+            # Find the nested affiliation schema
+            for n in fs.nested:
+                result.setdefault(n.rel_name, []).extend(aff_id_rows)
+
+    return result
+
+
+def _pattern_issn(
+    entity_id: int,
+    items: list[Any],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: ISSN string list → {entity}_id, issn."""
+    rows: list[dict] = []
+    for issn in items:
+        if issn:
+            rows.append({entity_id_col: entity_id, "issn": str(issn)})
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_apc_prices(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: APC price dicts → {entity}_id, price, currency."""
+    rows: list[dict] = []
+    for apc in items:
+        price = apc.get("price")
+        if price is not None:
+            rows.append({
+                entity_id_col: entity_id,
+                "price": float(price),
+                "currency": apc.get("currency"),
+            })
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_societies(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: society dicts with organization + url."""
+    rows: list[dict] = []
+    for society in items:
+        org = society.get("organization")
+        if org:
+            rows.append({
+                entity_id_col: entity_id,
+                "organization": org,
+                "url": society.get("url"),
+            })
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_awards(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: work awards with id + display_name + funder fields."""
+    rows: list[dict] = []
+    for award in items:
+        award_id = extract_id(award.get("id"))
+        if award_id is not None:
+            rows.append({
+                entity_id_col: entity_id,
+                "award_id": award_id,
+                "display_name": award.get("display_name"),
+                "funder_award_id": award.get("funder_award_id"),
+                "funder_id": extract_id(award.get("funder_id")),
+                "funder_display_name": award.get("funder_display_name"),
+            })
+    return {fs.rel_name: rows} if rows else {}
+
+
+def _pattern_locations(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: location dicts with source.id + metadata."""
+    rows: list[dict] = []
+    for loc in items:
+        source = loc.get("source") or {}
+        source_id = extract_id(source.get("id"))
+        if source_id is not None:
+            rows.append({
+                entity_id_col: entity_id,
+                "source_id": source_id,
+                "is_oa": bool(loc.get("is_oa", False)),
+                "is_primary": bool(loc.get("is_primary", False)),
+                "license": loc.get("license"),
+                "version": loc.get("version"),
+            })
+    return {fs.rel_name: rows} if rows else {}
+
+
+# ── Pattern dispatch ───────────────────────────────────────────────────
+
+_PATTERN_DISPATCH: dict[str, Any] = {
+    "url_list": _pattern_url_list,
+    "id_ref": _pattern_id_ref,
+    "nested_id_ref": _pattern_nested_id_ref,
+    "time_series": _pattern_time_series,
+    "external_ids": _pattern_external_ids,
+    "string_list": _pattern_string_list,
+    "json_blob": _pattern_json_blob,
+    "roles": _pattern_roles,
+    "topic_share": _pattern_topic_share,
+    "taxonomy_parent": _pattern_taxonomy_parent,
+    "grants": _pattern_grants,
+    "mesh": _pattern_mesh,
+    "investigators": _pattern_investigators,
+    "issn": _pattern_issn,
+    "apc_prices": _pattern_apc_prices,
+    "societies": _pattern_societies,
+    "awards": _pattern_awards,
+    "locations": _pattern_locations,
+}
+
+
+# ── Generic extractor ──────────────────────────────────────────────────
+
+
+def extract_relationships(
+    record: dict,
+    schema: EntitySchema,
+) -> dict[str, list[dict]]:
+    """Extract all relationship rows from a single record using its schema.
+
+    Returns {rel_name: [row_dict, ...]} for each relationship type
+    that has data in this record.
+    """
+    entity_id = extract_id(_resolve_nested(record, schema.id_path))
+    if entity_id is None:
+        # Non-numeric IDs (continents, countries) — use string tail
+        raw_id = _resolve_nested(record, schema.id_path)
+        if isinstance(raw_id, str) and raw_id:
+            entity_id = raw_id.rsplit("/", 1)[-1]
+        if entity_id is None:
+            return {}
+
+    result: dict[str, list[dict]] = {}
+
+    for fs in schema.fields:
+        value = record.get(fs.json_key)
+
+        # Handle None / empty
+        if value is None:
+            continue
+        if isinstance(value, list) and len(value) == 0:
+            continue
+        if isinstance(value, dict) and len(value) == 0:
+            continue
+
+        handler = _PATTERN_DISPATCH.get(fs.pattern)
+        if handler is None:
+            log.warning("Unknown pattern %s for field %s", fs.pattern, fs.json_key)
+            continue
+
+        # Some patterns expect a single dict, not an array
+        if fs.is_singular_dict:
+            if not isinstance(value, dict):
+                continue
+            extracted = handler(entity_id, value, fs, schema.id_col)
+        else:
+            extracted = handler(entity_id, value, fs, schema.id_col)
+
+        for rel_name, rows in extracted.items():
+            result.setdefault(rel_name, []).extend(rows)
+
+    return result
+
+
+# ── Schema probe ────────────────────────────────────────────────────────
+# Infers an EntitySchema from a sample record. This is the only place
+# where per-entity knowledge exists — and it's expressed as generic
+# structural heuristics, not per-entity code.
+
+
+def _add_empty_list_field(
+    key: str,
+    entity: str,
+    rel_prefix: str,
+    fields: list[FieldSchema],
+) -> None:
+    """Classify an empty-list field by name heuristics.
+
+    When a list is empty in all sampled records, we can't infer its pattern
+    from content. Instead, we use the field name to determine the pattern.
+    """
+    _EMPTY_LIST_SCHEMAS: dict[str, tuple[str, str, dict[str, str] | None, list[str] | None]] = {
+        # key → (pattern, rel_name, col_renames, extra_cols)
+        "indexed_in": ("string_list", "indexed_in", {"value": "index_name"}, None),
+        "display_name_alternatives": ("string_list", "name_alternatives", {"value": "display_name_alternative"}, None),
+        "alternate_titles": ("string_list", "alternate_titles", {"value": "title"}, None),
+        "display_name_acronyms": ("string_list", "name_acronyms", {"value": "display_name_acronym"}, None),
+        "country_codes": ("string_list", "countries", {"value": "country_code"}, None),
+        "keywords": ("string_list", None, {"value": "keyword"}, None),
+        "issn": ("issn", "issns", None, None),
+        "counts_by_year": ("time_series", "counts_by_year", None, ["works_count", "cited_by_count", "oa_works_count"]),
+        "funded_outputs": ("url_list", "funded_outputs", None, None),
+        "societies": ("societies", "societies", None, None),
+        "apc_prices": ("apc_prices", "apc_prices", None, None),
+        "ancestors": ("id_ref", "ancestors", None, None),
+        "related_concepts": ("id_ref", "related", None, ["score"]),
+        "repositories": ("string_list", "repositories", None, None),
+        "affiliations": ("nested_id_ref", None, None, None),
+        "grants": ("grants", "funders", None, None),
+        "awards": ("awards", "awards", None, None),
+        "sustainable_development_goals": ("id_ref", "sdgs", None, ["score"]),
+        "ids": ("external_ids", "external_ids", None, None),
+        "abstract_inverted_index": ("json_blob", "abstracts", None, None),
+    }
+
+    entry = _EMPTY_LIST_SCHEMAS.get(key)
+    if entry is None:
+        # Generic string list if the key matches a known pattern
+        if any(p in key for p in _STRING_LIST_PATTERNS):
+            fields.append(FieldSchema(
+                json_key=key, pattern="string_list",
+                rel_name=_rel_name(entity, key, f"{rel_prefix}{key}"),
+            ))
+        return
+
+    pattern, rel_name_override, col_renames, extra_cols = entry
+    rel_name = _rel_name(entity, key, f"{rel_prefix}{rel_name_override or key}")
+
+    fs = FieldSchema(
+        json_key=key,
+        pattern=pattern,
+        rel_name=rel_name,
+        col_renames=col_renames or {},
+        extra_cols=extra_cols or [],
+    )
+
+    if key == "affiliations":
+        # Author affiliations — special nested structure
+        fs.id_path = "institution.id"
+        fs.nested = [
+            FieldSchema(
+                json_key="institutions", pattern="id_ref",
+                rel_name=_rel_name(entity, "institutions", f"{rel_prefix}institution_ids"),
+                id_path="id",
+            ),
+        ]
+    elif key == "ancestors" or key == "related_concepts":
+        fs.id_path = "id"
+    elif key == "sustainable_development_goals":
+        fs.id_path = "id"
+
+    fields.append(fs)
+
+
+def _classify_field(
+    key: str,
+    value: Any,
+    entity: str,
+    all_keys: set[str],
+) -> list[FieldSchema]:
+    """Classify a JSON field into extraction pattern(s).
+
+    Returns a list because some fields produce multiple relationship
+    tables (e.g. authorships → work_authorships + work_authorship_institutions).
+    """
+    sing = _singular(entity)
+    rel_prefix = f"{sing}_"
+    fields: list[FieldSchema] = []
+
+    # Skip explicitly-ignored fields
+    if key in _SKIP_FIELDS:
+        return []
+    # Skip singular versions of arrays
+    if key.startswith("primary_") or key.startswith("best_"):
+        array_key = key.replace("primary_", "").replace("best_", "")
+        if array_key in all_keys:
+            return []
+
+    # ── None values (field exists but no data in this record) ──
+    if value is None:
+        # Classify by key name heuristics, same as empty lists
+        _add_empty_list_field(key, entity, rel_prefix, fields)
+        return fields
+
+    # ── Dict values ──
+    if isinstance(value, dict):
+        if key == "ids":
+            fields.append(FieldSchema(
+                json_key="ids", pattern="external_ids",
+                rel_name=f"{rel_prefix}external_ids",
+            ))
+            # Check if ids contains an 'issn' array (source entities)
+            if "issn" in value and isinstance(value.get("issn"), list):
+                fields.append(FieldSchema(
+                    json_key="issn", pattern="issn",
+                    rel_name=f"{rel_prefix}issns",
+                ))
+        elif key == "abstract_inverted_index":
+            fields.append(FieldSchema(
+                json_key="abstract_inverted_index", pattern="json_blob",
+                rel_name=f"{rel_prefix}abstracts",
+            ))
+        # Taxonomy parent: single dict with "id" and "display_name"
+        elif "id" in value and "display_name" in value:
+            fields.append(FieldSchema(
+                json_key=key, pattern="taxonomy_parent",
+                rel_name=f"{rel_prefix}{key}s",
+                id_path="id",
+                is_singular_dict=True,
+            ))
+        # Otherwise skip (metadata wrapper like biblio, open_access, etc.)
+        return fields
+
+    # ── List values ──
+    # ── List values ──
+    if isinstance(value, list):
+        if len(value) == 0:
+            # Empty list: classify by name heuristics
+            # These fields are known to exist even when empty in sample records
+            _add_empty_list_field(key, entity, rel_prefix, fields)
+            return fields
+
+        first = value[0]
+
+        # List of strings
+        if isinstance(first, str):
+            # URL list: strings containing openalex.org or https://
+            if any("openalex.org" in s or s.startswith("https://") for s in value[:5]):
+                fields.append(FieldSchema(
+                    json_key=key, pattern="url_list",
+                    rel_name=f"{rel_prefix}{key}",
+                ))
+            # String list: matching known patterns OR keywords/lists
+            elif any(p in key for p in _STRING_LIST_PATTERNS) or key == "indexed_in" or key == "keywords":
+                # Naming conventions: display_name_alternatives → name_alternatives,
+                # alternate_titles stays as alternate_titles
+                if key == "display_name_alternatives":
+                    rel_name = f"{rel_prefix}name_alternatives"
+                    col_name = "display_name_alternative"
+                elif key == "alternate_titles":
+                    rel_name = f"{rel_prefix}alternate_titles"
+                    col_name = "title"
+                elif key == "display_name_acronyms":
+                    rel_name = f"{rel_prefix}name_acronyms"
+                    col_name = "display_name_acronym"
+                elif key == "country_codes":
+                    rel_name = f"{rel_prefix}countries"
+                    col_name = "country_code"
+                elif key == "indexed_in":
+                    rel_name = f"{rel_prefix}indexed_in"
+                    col_name = "index_name"
+                elif key == "keywords":
+                    rel_name = f"{rel_prefix}{key}"
+                    col_name = "keyword"
+                else:
+                    rel_name = f"{rel_prefix}{key}"
+                    col_name = key.rstrip("s")
+                fields.append(FieldSchema(
+                    json_key=key, pattern="string_list",
+                    rel_name=rel_name,
+                    col_renames={"value": col_name},
+                ))
+            return fields
+
+        # List of dicts
+        if isinstance(first, dict):
+            # Time series: has 'year' key
+            if "year" in first:
+                numeric_cols = [
+                    k for k in first
+                    if k != "year" and isinstance(first.get(k), (int, float))
+                ]
+                fields.append(FieldSchema(
+                    json_key=key, pattern="time_series",
+                    rel_name=f"{rel_prefix}counts_by_year",
+                    extra_cols=numeric_cols,
+                ))
+                return fields
+
+            # Roles: has 'id' + 'role'
+            if "id" in first and "role" in first:
+                fields.append(FieldSchema(
+                    json_key=key, pattern="roles",
+                    rel_name=f"{rel_prefix}roles",
+                ))
+                return fields
+
+            # Topic share: has 'id' + 'value' + domain/field/subfield
+            if "id" in first and "value" in first and "domain" in first:
+                fields.append(FieldSchema(
+                    json_key=key, pattern="topic_share",
+                    rel_name=f"{rel_prefix}topic_share",
+                ))
+                return fields
+
+            # MeSH terms: has descriptor_ui
+            if "descriptor_ui" in first:
+                fields.append(FieldSchema(
+                    json_key=key, pattern="mesh",
+                    rel_name=f"{rel_prefix}mesh",
+                ))
+                return fields
+
+            # APC prices: has 'price' + 'currency'
+            if "price" in first and "currency" in first:
+                fields.append(FieldSchema(
+                    json_key=key, pattern="apc_prices",
+                    rel_name=f"{rel_prefix}apc_prices",
+                ))
+                return fields
+
+            # Societies: has 'organization'
+            if "organization" in first and "url" in first:
+                fields.append(FieldSchema(
+                    json_key=key, pattern="societies",
+                    rel_name=f"{rel_prefix}societies",
+                ))
+                return fields
+
+            # Grants: has 'funder' (string URL) + optional 'award_id'
+            if "funder" in first and isinstance(first.get("funder"), str):
+                fields.append(FieldSchema(
+                    json_key=key, pattern="grants",
+                    rel_name=f"{rel_prefix}funders",
+                ))
+                return fields
+
+            # Awards: has 'id' + 'display_name' + 'funder_id'
+            if "id" in first and "funder_id" in first:
+                fields.append(FieldSchema(
+                    json_key=key, pattern="awards",
+                    rel_name=f"{rel_prefix}awards",
+                ))
+                return fields
+
+            # Locations: has 'source' dict with 'id'
+            if "source" in first and isinstance(first.get("source"), dict):
+                fields.append(FieldSchema(
+                    json_key=key, pattern="locations",
+                    rel_name=f"{rel_prefix}locations",
+                ))
+                return fields
+
+            # Investigators: has given_name/family_name/orcid
+            if "given_name" in first and "family_name" in first:
+                inv_fs = FieldSchema(
+                    json_key=key, pattern="investigators",
+                    rel_name=f"{rel_prefix}investigators",
+                    nested=[
+                        FieldSchema(
+                            json_key="affiliation",
+                            pattern="investigators",  # reused for nested
+                            rel_name=f"{rel_prefix}investigator_affiliations",
+                        ),
+                    ],
+                )
+                fields.append(inv_fs)
+                return fields
+
+            # Generic id_ref: has 'id' field OR sub-dict with 'id'
+            if "id" in first or any(
+                isinstance(v, dict) and "id" in v
+                for v in first.values()
+            ):
+                # Determine extra scalar columns
+                extra = [
+                    k for k in first
+                    if k != "id"
+                    and not isinstance(first.get(k), (list, dict))
+                    and not k.startswith("raw_")
+                    and k not in {"display_name", "wikidata"}
+                ]
+
+                # Check for nested sub-arrays with id-bearing dicts
+                nested: list[FieldSchema] = []
+                for sub_key, sub_val in first.items():
+                    if sub_key in _SKIP_NESTED_KEYS:
+                        continue
+                    if isinstance(sub_val, list) and sub_val:
+                        sub_first = sub_val[0]
+                        if isinstance(sub_first, dict) and "id" in sub_first:
+                            nested.append(FieldSchema(
+                                json_key=sub_key, pattern="id_ref",
+                                rel_name=f"{rel_prefix}{key}_{sub_key}",
+                                id_path="id",
+                            ))
+
+                # Also check for id-bearing sub-dicts (like author.id)
+                id_subdict: str | None = None
+                for sub_key, sub_val in first.items():
+                    if isinstance(sub_val, dict) and "id" in sub_val:
+                        id_subdict = sub_key
+                        break
+
+                if nested or id_subdict:
+                    pattern = "nested_id_ref"
+                    id_path = f"{id_subdict}.id" if id_subdict else "id"
+                    # Adjust extra columns: remove sub-dict keys
+                    extra = [
+                        k for k in extra
+                        if k != id_subdict and k not in {n.json_key for n in nested}
+                    ]
+                    fields.append(FieldSchema(
+                        json_key=key, pattern=pattern,
+                        rel_name=f"{rel_prefix}{key}",
+                        id_path=id_path,
+                        extra_cols=extra,
+                        nested=nested,
+                    ))
+                else:
+                    fields.append(FieldSchema(
+                        json_key=key, pattern="id_ref",
+                        rel_name=f"{rel_prefix}{key}",
+                        id_path="id",
+                        extra_cols=extra,
+                    ))
+                return fields
+
+        return fields
+
+    return fields
+
+
+def probe_schema(entity: str, record: dict) -> EntitySchema:
+    """Build an EntitySchema by probing a single sample record.
+
+    Classifies each field in the record into an extraction pattern
+    using structural heuristics. No per-entity code needed.
+
+    For more reliable schema inference (catching fields that are
+    empty in one record but populated in others), use probe_schema_multi.
+    """
+    sing = _singular(entity)
+    id_col = f"{sing}_id"
+    id_path = "id"  # All OpenAlex entities have "id" at top level
+
+    all_keys = set(record.keys())
+    fields: list[FieldSchema] = []
+
+    for key in sorted(record.keys()):
+        value = record[key]
+        new_fields = _classify_field(key, value, entity, all_keys)
+        # Apply naming overrides for backward compatibility
+        for f in new_fields:
+            f.rel_name = _rel_name(entity, f.json_key, f.rel_name)
+            for n in f.nested:
+                compound_key = f.json_key + "_" + n.json_key
+                n.rel_name = _rel_name(entity, compound_key, n.rel_name)
+        fields.extend(new_fields)
+
+    schema = EntitySchema(
+        entity=entity,
+        id_col=id_col,
+        id_path=id_path,
+        fields=fields,
+    )
+    log.info(
+        "Probed schema for %s: %d fields, %d relationship types",
+        entity, len(fields), len(schema.rel_type_names()),
+    )
+    return schema
+
+
+def probe_schema_multi(entity: str, records: list[dict]) -> EntitySchema:
+    """Build an EntitySchema by probing multiple sample records.
+
+    Merges fields discovered across all records so that empty arrays
+    in one record don't prevent a field from being classified. Fields
+    are deduplicated by rel_name; the first classification wins since
+    patterns are determined by structure, not content variation.
+    """
+    if not records:
+        raise ValueError(f"No records provided for {entity}")
+
+    sing = _singular(entity)
+    id_col = f"{sing}_id"
+    id_path = "id"
+    rel_prefix = f"{sing}_"
+
+    # Collect all keys across all records for the skip-logic
+    all_keys: set[str] = set()
+    for record in records:
+        all_keys.update(record.keys())
+
+    seen_rel_names: dict[str, FieldSchema] = {}
+
+    for record in records:
+        for key in sorted(record.keys()):
+            value = record[key]
+            # Skip if we already classified this key
+            if any(f.json_key == key for f in seen_rel_names.values()):
+                continue
+            new_fields = _classify_field(key, value, entity, all_keys)
+            for f in new_fields:
+                f.rel_name = _rel_name(entity, f.json_key, f.rel_name)
+                for n in f.nested:
+                    # Nested fields: override by compound key (parent_sub)
+                    # e.g. authorships_institutions
+                    compound_key = f.json_key + "_" + n.json_key
+                    n.rel_name = _rel_name(entity, compound_key, n.rel_name)
+                if f.rel_name not in seen_rel_names:
+                    seen_rel_names[f.rel_name] = f
+
+    # ── Known keys supplement ──
+    # Some JSON keys only appear in records that have data for them.
+    # If they're absent from all sample records, we add them from this list.
+    _KNOWN_OPTIONAL_KEYS: dict[str, list[tuple[str, str, str]]] = {
+        # entity → [(json_key, pattern, rel_name_suffix), ...]
+        "works": [
+            ("grants", "grants", "funders"),
+            ("sustainable_development_goals", "id_ref", "sdgs"),
+        ],
+    }
+
+    known_optional = _KNOWN_OPTIONAL_KEYS.get(entity, [])
+    existing_json_keys = {f.json_key for f in seen_rel_names.values()}
+    for json_key, pattern, rel_name_suffix in known_optional:
+        if json_key not in existing_json_keys:
+            rel_name = _rel_name(entity, json_key, f"{rel_prefix}{rel_name_suffix}")
+            fs = FieldSchema(
+                json_key=json_key,
+                pattern=pattern,
+                rel_name=rel_name,
+            )
+            if pattern == "id_ref":
+                fs.id_path = "id"
+                fs.extra_cols = ["score"]
+            seen_rel_names[rel_name] = fs
+
+    schema = EntitySchema(
+        entity=entity,
+        id_col=id_col,
+        id_path=id_path,
+        fields=list(seen_rel_names.values()),
+    )
+    log.info(
+        "Probed schema for %s (multi): %d fields, %d relationship types",
+        entity, len(schema.fields), len(schema.rel_type_names()),
+    )
+    return schema
