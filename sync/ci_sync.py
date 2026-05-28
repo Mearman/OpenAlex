@@ -91,12 +91,16 @@ def _size_aware_batch(
     max_batches: int,
     rel_count: int = 1,
 ) -> list[list[str]]:
-    """Split keys into batches balanced by total shard size.
+    """Split keys into batches balanced by estimated processing cost.
+
+    The dominant cost is the per-shard extract+upload cycle (each shard
+    triggers one upload_large_folder call). Byte size is a secondary factor
+    for extraction time. The cost model weights shard count heavily and
+    uses byte size as a tiebreaker to avoid concentrating all large
+    partitions in one batch.
 
     Uses a greedy largest-fit algorithm: sorts shards by size descending,
-    then assigns each to the batch with the smallest current total. This
-    produces batches with roughly equal total byte size, so no single
-    batch disproportionately contains all the large partitions.
+    then assigns each to the batch with the smallest current cost.
 
     Falls back to positional slicing when sizes are unavailable.
     """
@@ -114,14 +118,18 @@ def _size_aware_batch(
     sorted_keys = sorted(keys, key=lambda k: sizes.get(k, 0), reverse=True)
 
     batches: list[list[str]] = [[] for _ in range(max_batches)]
-    batch_totals: list[int] = [0] * max_batches
+    batch_counts: list[int] = [0] * max_batches  # primary: shard count
+    batch_bytes: list[int] = [0] * max_batches  # secondary: total bytes
 
     for key in sorted_keys:
         size = sizes.get(key, 0)
-        # Find the batch with the smallest total
-        min_idx = batch_totals.index(min(batch_totals))
+        # Find the batch with the smallest count; break ties by bytes
+        min_count = min(batch_counts)
+        candidates = [i for i, c in enumerate(batch_counts) if c == min_count]
+        min_idx = min(candidates, key=lambda i: batch_bytes[i])
         batches[min_idx].append(key)
-        batch_totals[min_idx] += size
+        batch_counts[min_idx] += 1
+        batch_bytes[min_idx] += size
 
     return batches
 
