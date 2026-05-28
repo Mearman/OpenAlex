@@ -680,6 +680,8 @@ def sync_shards(
                     pq_rel = pq.relative_to(staging_root / "parquet")
                     pq_upload = upload_dir / "data" / pq_rel
                     pq_upload.parent.mkdir(parents=True, exist_ok=True)
+                    if pq_upload.exists() or pq_upload.is_symlink():
+                        pq_upload.unlink()
                     pq_upload.symlink_to(pq.resolve())
 
                 elapsed = time.monotonic() - t0
