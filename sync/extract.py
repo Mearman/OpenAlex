@@ -1505,7 +1505,7 @@ class _SourceFileWriter:
 
 
 def _worker_process_files(
-    args: tuple[int, list[Path], str, list[str], int],
+    args: tuple[int, list[Path], str, list[str], int, Path],
 ) -> dict:
     """Process a list of source files in one worker process.
 
@@ -1515,14 +1515,13 @@ def _worker_process_files(
 
     Returns ``{"worker_id": int, "results": {source_key: {rt: row_count}}}``.
     """
-    worker_id, source_files, entity_type, rel_types_list, batch_size, type_completed_keys = args
+    worker_id, source_files, entity_type, rel_types_list, batch_size, type_completed_keys, output_base = args
     rel_types = frozenset(rel_types_list)
 
     log.info("[w%02d] processing %d source files", worker_id, len(source_files))
 
     # Cache globals for loop performance
     _extract = _extract_one_source_file
-    _snapshot_dir = SNAPSHOT_DIR
     _staging_dir = STAGING_DIR
     _tck = type_completed_keys
 
@@ -1544,7 +1543,7 @@ def _worker_process_files(
             entity_type,
             pending_types,
             batch_size,
-            _snapshot_dir,
+            output_base,
             _staging_dir,
         )
         all_results[source_key] = {
@@ -1890,6 +1889,7 @@ def convert_relationships(
     batch_size: int | None = None,
     slice_index: int | None = None,
     slice_total: int | None = None,
+    output_dir: Path | None = None,
 ) -> dict[str, int]:
     """Convert nested JSONL arrays to relationship Parquet tables.
 
@@ -1915,10 +1915,15 @@ def convert_relationships(
         include_inferred: If False, skip inferred relationship types.
         workers: Number of parallel worker processes per type.
         batch_size: Rows per parquet row-group flush.
+        output_dir: Directory to write parquet output to. Defaults to
+            ``SNAPSHOT_DIR`` so that ``rt_dir(output_dir, rt)`` resolves
+            to the same path as ``rt_dir(SNAPSHOT_DIR, rt)``.
 
     Returns:
         Mapping of relationship type name to number of rows written.
     """
+    _output_dir = output_dir if output_dir is not None else SNAPSHOT_DIR
+
     if entity_type not in _ENTITY_DISPATCH:
         log.info("%s: no relationship extraction defined, skipping", entity_type)
         return {}
@@ -1971,7 +1976,7 @@ def convert_relationships(
             types_to_run.append(rt)
             continue
 
-        _rt_dir = rt_dir(SNAPSHOT_DIR, rt)
+        _rt_dir = rt_dir(_output_dir, rt)
 
         # Check which source files have valid parquet shards on disk
         all_completed_keys = _completed_source_keys(_rt_dir)
@@ -2072,7 +2077,7 @@ def convert_relationships(
     types_already_done: list[str] = []
 
     for rt in types_to_run:
-        _rt_dir = rt_dir(SNAPSHOT_DIR, rt)
+        _rt_dir = rt_dir(_output_dir, rt)
         create_output_dir(_rt_dir)
 
         completed = _completed_source_keys(_rt_dir)
@@ -2130,7 +2135,7 @@ def convert_relationships(
     if actual_workers == 1:
         worker_results = [
             _worker_process_files(
-                (0, files_to_process, entity_type, all_pending_types, effective_batch_size, type_completed_keys),
+                (0, files_to_process, entity_type, all_pending_types, effective_batch_size, type_completed_keys, _output_dir),
             ),
         ]
     else:
@@ -2140,7 +2145,7 @@ def convert_relationships(
         ]
 
         worker_args = [
-            (i, chunk, entity_type, all_pending_types, effective_batch_size, type_completed_keys)
+            (i, chunk, entity_type, all_pending_types, effective_batch_size, type_completed_keys, _output_dir)
             for i, chunk in enumerate(chunks)
             if chunk
         ]
@@ -2154,7 +2159,7 @@ def convert_relationships(
 
     # Finalise each type independently
     for rt in all_pending_types:
-        _rt_dir = rt_dir(SNAPSHOT_DIR, rt)
+        _rt_dir = rt_dir(_output_dir, rt)
 
         new_row_count = sum(
             rt_counts.get(rt, 0)

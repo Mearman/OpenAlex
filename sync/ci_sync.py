@@ -148,17 +148,25 @@ def _size_aware_batch(
     return batches
 
 
-def _entity_rel_types(entity: str) -> list[str] | None:
-    """Get relationship type names for an entity.
+def _entity_rel_types(entity: str) -> frozenset[str]:
+    """Return all relationship type names for an entity."""
+    from sync.extract import _ENTITY_DISPATCH
+    if entity not in _ENTITY_DISPATCH:
+        return frozenset()
+    rel_types, _ = _ENTITY_DISPATCH[entity]
+    return rel_types
+
+
+def _entity_rel_subdirs(entity: str) -> list[str] | None:
+    """Get relationship subdirectory names for an entity (as they appear on HF).
 
     Returns None if the entity doesn't support relationship extraction.
-    Returns a list of relationship subdirectory names (as they appear on HF).
     """
-    from sync.extract import _ENTITY_DISPATCH, nested_rt_path
-    if entity not in _ENTITY_DISPATCH:
+    from sync.extract import nested_rt_path
+    types = _entity_rel_types(entity)
+    if not types:
         return None
-    rel_types, _ = _ENTITY_DISPATCH[entity]
-    return sorted(nested_rt_path(rt) for rt in rel_types)
+    return sorted(nested_rt_path(rt) for rt in types)
 
 
 # ── S3 helpers ───────────────────────────────────────────────────────────
@@ -345,13 +353,18 @@ def _extract_shard(
     source_path: Path,
     entity: str,
     output_dir: Path,
+    rel_types: frozenset[str] | None = None,
 ) -> list[Path]:
-    """Extract a single source shard to parquet.
+    """Extract relationship parquets from a single source shard.
 
-    Creates a minimal mock snapshot containing only this shard's source
-    file (symlinked into a temp directory). convert_relationships
-    reads from the mock, writes parquets to output_dir, and we move
-    them into the upload tree. No staging symlinks, no shutil chains.
+    Creates a minimal mock snapshot (temp symlink for
+    convert_relationships to find the source file). Parquets are
+    written directly to output_dir via the output_dir parameter —
+    no post-extraction moves needed.
+
+    When *rel_types* is given, only those types are extracted; all
+    others are excluded. This bounds disk usage to one source file +
+    one parquet at a time.
 
     Returns list of parquet file paths written (inside output_dir).
     """
@@ -370,20 +383,26 @@ def _extract_shard(
         original_snapshot = common.SNAPSHOT_DIR
         common.SNAPSHOT_DIR = tmp_dir / "data"
 
+        # Build exclusion set: all entity rel types minus requested ones
+        exclude: frozenset[str] | None = None
+        all_types = _entity_rel_types(entity)
+        if rel_types is not None and rel_types != all_types:
+            exclude = all_types - rel_types
+
         try:
             convert_relationships(
-                entity, force=True, workers=2,
+                entity, force=True, workers=1,
+                exclude=exclude, output_dir=output_dir,
             )
         finally:
             common.SNAPSHOT_DIR = original_snapshot
 
-        parquet_files = list((tmp_dir / "data").rglob("*.parquet"))
+        # Collect parquets written to output_dir
         result = []
-        for pq in parquet_files:
-            dest = output_dir / pq.relative_to(tmp_dir / "data")
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(pq), str(dest))
-            result.append(dest)
+        entity_out = output_dir / entity
+        if entity_out.exists():
+            for pq in entity_out.rglob("*.parquet"):
+                result.append(pq)
 
         return result
 
@@ -600,18 +619,18 @@ def sync_shards(
 
     total = len(queue)
     entity_name = queue[0][0] if queue else "unknown"
-    print(f"Syncing {total} shards ({entity_name})")
+    all_rel_types = _entity_rel_types(entity_name)
+    rel_type_list = sorted(all_rel_types)
+    print(f"Syncing {total} shards ({entity_name}, {len(rel_type_list)} rel types)")
 
-    # Staging directory for all prepared files
+    # Staging directory for downloaded files before they enter upload dir
     staging_root = Path(tempfile.mkdtemp(prefix="openalex-sync-"))
     upload_dir = staging_root / "upload"
     upload_dir.mkdir()
 
-    # Upload after each shard to keep disk bounded.
-    # Previous batching (every 50) caused disk exhaustion on large
-    # entities like works, where source files + parquets accumulate
-    # to many GB before the upload cycle triggers.
-    UPLOAD_EVERY = 1
+    # Disk-aware upload: trigger when free space drops below threshold.
+    # Also upload after every shard to keep disk bounded at ~1 shard.
+    DISK_GUARD_MB = 2048  # 2 GB minimum free space
 
     results: list[SyncResult] = []
     succeeded = 0
@@ -632,6 +651,39 @@ def sync_shards(
     from concurrent.futures import Future
     prefetch_pool = ThreadPoolExecutor(max_workers=1)
     outstanding_future: Future[None] | None = None
+
+    def _upload_and_clean(label: str) -> None:
+        """Upload upload_dir to HF, then clean all files."""
+        nonlocal uploaded_count
+        print(f"Uploading {label}...")
+        api = HfApi()
+        try:
+            api.upload_large_folder(
+                folder_path=str(upload_dir),
+                repo_id=HF_REPO_ID,
+                repo_type="dataset",
+                ignore_patterns=["._*"],
+            )
+            uploaded_count = succeeded
+            print(f"  Upload complete ({label})")
+            # Clean all files from upload dir to free disk
+            for p in upload_dir.rglob("*"):
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+            # Remove empty directories
+            for p in sorted(upload_dir.rglob("*"), reverse=True):
+                if p.is_dir():
+                    try:
+                        p.rmdir()
+                    except OSError:
+                        pass
+        except Exception as exc:
+            print(f"  Upload FAILED ({label}): {exc}")
+
+    def _disk_free_mb() -> float:
+        """Free disk space in MB at the staging root."""
+        usage = shutil.disk_usage(staging_root)
+        return usage.free / (1024 * 1024)
 
     try:
         for i, (entity, s3_key) in enumerate(queue):
@@ -668,7 +720,7 @@ def sync_shards(
                 if local_gz != jsonl_gz:
                     local_gz.rename(jsonl_gz)
 
-                # Move source file directly into upload dir (no symlink)
+                # Move source file directly into upload dir
                 hf_path = _s3_key_to_hf_path(s3_key)
                 src_upload = upload_dir / "data" / hf_path
                 src_upload.parent.mkdir(parents=True, exist_ok=True)
@@ -676,15 +728,19 @@ def sync_shards(
                     src_upload.unlink()
                 shutil.move(str(jsonl_gz), str(src_upload))
 
-                # Extract — mock snapshot still needs a temp symlink for
-                # convert_relationships, but parquets move directly into
-                # the upload tree (no intermediate symlinks)
-                parquet_files = _extract_shard(
-                    src_upload, entity, upload_dir / "data",
-                )
+                # Per-rel-type extraction: extract one type at a time,
+                # upload each, then clean. Bounds disk to ~1 source + 1 parquet.
+                total_parquets = 0
+                for rt in rel_type_list:
+                    rt_singleton = frozenset({rt})
+                    pq_files = _extract_shard(
+                        src_upload, entity, upload_dir / "data",
+                        rel_types=rt_singleton,
+                    )
+                    total_parquets += len(pq_files)
 
                 elapsed = time.monotonic() - t0
-                n_files = 1 + len(parquet_files)
+                n_files = 1 + total_parquets
                 result["status"] = "ok"
                 result["files"] = n_files
                 result["seconds"] = round(elapsed, 1)
@@ -695,6 +751,16 @@ def sync_shards(
                     f"({n_files} files, {elapsed:.0f}s)"
                 )
 
+                # Upload after each shard to keep disk bounded
+                _upload_and_clean(f"shard {s3_key}")
+
+                # Disk guard: if free space is low, skip prefetch
+                if _disk_free_mb() < DISK_GUARD_MB:
+                    if outstanding_future is not None:
+                        outstanding_future.cancel()
+                        outstanding_future = None
+                    print(f"  Disk guard: {_disk_free_mb():.0f} MB free, skipping prefetch")
+
             except Exception as exc:
                 elapsed = time.monotonic() - t0
                 result["status"] = "error"
@@ -704,62 +770,20 @@ def sync_shards(
 
                 print(f"  [{processed}/{total}] FAILED {s3_key}: {exc}")
 
-            results.append(result)
+                # Upload whatever was prepared before the failure
+                has_files = any(p.is_file() for p in upload_dir.rglob("*"))
+                if has_files:
+                    _upload_and_clean(f"partial {s3_key}")
 
-            # Periodic upload — flush prepared files to HF every N shards
-            if succeeded > 0 and succeeded % UPLOAD_EVERY == 0:
-                print(f"Uploading batch ({succeeded} shards prepared so far)...")
-                api = HfApi()
-                try:
-                    api.upload_large_folder(
-                        folder_path=str(upload_dir),
-                        repo_id=HF_REPO_ID,
-                        repo_type="dataset",
-                        ignore_patterns=["._*"],
-                    )
-                    uploaded_count = succeeded
-                    print("  Batch upload complete")
-                    # Clean uploaded files from upload dir to free disk
-                    for p in upload_dir.rglob("*"):
-                        if p.is_file():
-                            p.unlink(missing_ok=True)
-                    # Remove empty directories
-                    for p in sorted(upload_dir.rglob("*"), reverse=True):
-                        if p.is_dir():
-                            try:
-                                p.rmdir()
-                            except OSError:
-                                pass
-                except Exception as exc:
-                    print(f"  Batch upload FAILED: {exc}")
+            results.append(result)
 
     finally:
         prefetch_pool.shutdown(wait=False)
 
-    # Final upload for remaining files
-    if succeeded > uploaded_count:
-        remaining = succeeded - uploaded_count
-        print(f"Uploading final batch ({remaining} shards)...")
-        api = HfApi()
-        t_upload = time.monotonic()
-        try:
-            api.upload_large_folder(
-                folder_path=str(upload_dir),
-                repo_id=HF_REPO_ID,
-                repo_type="dataset",
-                ignore_patterns=["._*"],
-            )
-            upload_elapsed = time.monotonic() - t_upload
-            uploaded_count = succeeded
-            print(f"Upload complete ({upload_elapsed:.0f}s)")
-        except Exception as exc:
-            print(f"Upload FAILED: {exc}")
-            for r in results[uploaded_count:]:
-                if r["status"] == "ok":
-                    r["status"] = "error"
-                    r["error"] = f"upload failed: {exc}"
-                    succeeded -= 1
-                    failed += 1
+    # Final upload for any remaining files
+    has_remaining = any(p.is_file() for p in upload_dir.rglob("*"))
+    if has_remaining and succeeded > uploaded_count:
+        _upload_and_clean("final batch")
 
     # Clean up
     shutil.rmtree(staging_root, ignore_errors=True)
