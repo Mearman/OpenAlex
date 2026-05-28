@@ -52,21 +52,35 @@ log = logging.getLogger("openalex-sync")
 # Used for matrix generation — relationship splitting is only applied to
 # entities with multiple relationship types.
 
-_ENTITY_REL_COUNTS: dict[str, int] = {
-    "works": 18,
-    "authors": 9,
-    "sources": 9,
-    "institutions": 10,
-    "publishers": 6,
-    "funders": 4,
-    "concepts": 4,
-    "topics": 5,
-    "subfields": 4,
-    "fields": 3,
-    "domains": 2,
-    "sdgs": 1,
-    "awards": 3,
-}
+# Derived from extract.py frozensets — single source of truth.
+# Do not edit manually; the frozensets in extract.py are canonical.
+def _build_entity_rel_counts() -> dict[str, int]:
+    from sync.extract import (
+        _WORK_RELATIONSHIP_TYPES, _AUTHOR_RELATIONSHIP_TYPES,
+        _SOURCE_RELATIONSHIP_TYPES, _INSTITUTION_RELATIONSHIP_TYPES,
+        _PUBLISHER_RELATIONSHIP_TYPES, _FUNDER_RELATIONSHIP_TYPES,
+        _CONCEPT_RELATIONSHIP_TYPES, _TOPIC_RELATIONSHIP_TYPES,
+        _SUBFIELD_RELATIONSHIP_TYPES, _FIELD_RELATIONSHIP_TYPES,
+        _DOMAIN_RELATIONSHIP_TYPES, _SDG_RELATIONSHIP_TYPES,
+        _AWARD_RELATIONSHIP_TYPES,
+    )
+    return {
+        "works": len(_WORK_RELATIONSHIP_TYPES),
+        "authors": len(_AUTHOR_RELATIONSHIP_TYPES),
+        "sources": len(_SOURCE_RELATIONSHIP_TYPES),
+        "institutions": len(_INSTITUTION_RELATIONSHIP_TYPES),
+        "publishers": len(_PUBLISHER_RELATIONSHIP_TYPES),
+        "funders": len(_FUNDER_RELATIONSHIP_TYPES),
+        "concepts": len(_CONCEPT_RELATIONSHIP_TYPES),
+        "topics": len(_TOPIC_RELATIONSHIP_TYPES),
+        "subfields": len(_SUBFIELD_RELATIONSHIP_TYPES),
+        "fields": len(_FIELD_RELATIONSHIP_TYPES),
+        "domains": len(_DOMAIN_RELATIONSHIP_TYPES),
+        "sdgs": len(_SDG_RELATIONSHIP_TYPES),
+        "awards": len(_AWARD_RELATIONSHIP_TYPES),
+    }
+
+_ENTITY_REL_COUNTS: dict[str, int] = _build_entity_rel_counts()
 
 
 def _shards_per_job_for_entity(entity: str, total_shards: int) -> int:
