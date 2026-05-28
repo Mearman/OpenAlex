@@ -628,8 +628,10 @@ def sync_shards(
     upload_dir = staging_root / "upload"
     upload_dir.mkdir()
 
-    # Disk-aware upload: trigger when free space drops below threshold.
-    # Also upload after every shard to keep disk bounded at ~1 shard.
+    # Batch uploads to reduce HF API calls. Per-shard uploads caused
+    # 429 rate limits when 20 parallel jobs each hit the API per shard.
+    # Disk guard triggers early upload when free space is low.
+    UPLOAD_EVERY = 5
     DISK_GUARD_MB = 2048  # 2 GB minimum free space
 
     results: list[SyncResult] = []
@@ -751,15 +753,22 @@ def sync_shards(
                     f"({n_files} files, {elapsed:.0f}s)"
                 )
 
-                # Upload after each shard to keep disk bounded
-                _upload_and_clean(f"shard {s3_key}")
+                # Batch upload: after N shards or when disk is low
+                do_batch_upload = (
+                    succeeded > 0 and succeeded % UPLOAD_EVERY == 0
+                )
+                if not do_batch_upload and succeeded > uploaded_count:
+                    do_batch_upload = _disk_free_mb() < DISK_GUARD_MB
 
-                # Disk guard: if free space is low, skip prefetch
-                if _disk_free_mb() < DISK_GUARD_MB:
-                    if outstanding_future is not None:
-                        outstanding_future.cancel()
-                        outstanding_future = None
-                    print(f"  Disk guard: {_disk_free_mb():.0f} MB free, skipping prefetch")
+                if do_batch_upload:
+                    _upload_and_clean(f"batch at shard {processed}/{total}")
+
+                    # Disk guard: if free space is still low, skip prefetch
+                    if _disk_free_mb() < DISK_GUARD_MB:
+                        if outstanding_future is not None:
+                            outstanding_future.cancel()
+                            outstanding_future = None
+                        print(f"  Disk guard: {_disk_free_mb():.0f} MB free, skipping prefetch")
 
             except Exception as exc:
                 elapsed = time.monotonic() - t0
