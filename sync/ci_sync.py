@@ -666,6 +666,8 @@ def sync_shards(
                 hf_path = _s3_key_to_hf_path(s3_key)
                 src_upload = upload_dir / hf_path
                 src_upload.parent.mkdir(parents=True, exist_ok=True)
+                if src_upload.exists() or src_upload.is_symlink():
+                    src_upload.unlink()
                 src_upload.symlink_to(jsonl_gz.resolve())
 
                 # Extract to parquet
