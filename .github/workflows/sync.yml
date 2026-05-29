@@ -9,6 +9,10 @@ on:
         description: 'Entity to sync (empty = all)'
         required: false
         default: ''
+      self_hosted_runner:
+        description: 'Self-hosted runner label (empty = managed only)'
+        required: false
+        default: ''
 
 concurrency:
   group: sync-openalex
@@ -72,6 +76,7 @@ jobs:
         id: detect
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SELF_HOSTED_RUNNER: ${{ github.event.inputs.self_hosted_runner || '' }}
         run: |
           ENTITY_ARG=""
           if [ -n "${{ github.event.inputs.entity }}" ]; then
@@ -104,20 +109,28 @@ jobs:
   sync:
     needs: detect
     if: needs.detect.outputs.has_new == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
     strategy:
       max-parallel: ${{ fromJSON(needs.detect.outputs.max_parallel) }}
       fail-fast: false
       matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
-    name: sync / ${{ matrix.label }}
+    name: sync / ${{ matrix.label }} (@${{ matrix.runner }})
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v6
+      - name: Set up Python (managed)
+        if: matrix.runner == 'ubuntu-latest'
+        uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: pip
+
+      - name: Set up Python (self-hosted)
+        if: matrix.runner != 'ubuntu-latest'
+        run: |
+          python3 --version || { echo "Python 3 required on self-hosted runner"; exit 1; }
+          python3 -m pip --version || { echo "pip required on self-hosted runner"; exit 1; }
 
       - run: pip install -r sync/requirements.txt
 

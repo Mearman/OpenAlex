@@ -919,17 +919,47 @@ def cleanup_tmp_files(entity_filter: str | None = None) -> None:
 
 
 def _emit_matrix(entries: list[dict]) -> None:
-    """Write matrix JSON and max_parallel to $GITHUB_OUTPUT or stdout."""
+    """Write matrix JSON and max_parallel to $GITHUB_OUTPUT or stdout.
+
+    When self-hosted runners are configured (``SELF_HOSTED_RUNNER`` env var),
+    entries are assigned to the appropriate runner label. Parallelism is
+    computed per runner pool so managed and self-hosted jobs run independently.
+    """
+    self_hosted_label = os.environ.get("SELF_HOSTED_RUNNER", "")
+    managed_label = "ubuntu-latest"
+
+    # Threshold: entities with this many shards or more go to self-hosted.
+    # Self-hosted runners have more disk and no 6-hour timeout, making them
+    # better for large extraction workloads.
+    self_hosted_threshold = int(os.environ.get("SELF_HOSTED_THRESHOLD", "50"))
+
+    # Assign runners to entries if self-hosted is configured
+    if self_hosted_label and entries:
+        for entry in entries:
+            shard_count = int(entry.get("total_shards", "1"))
+            # Large entities or specific named entities go to self-hosted
+            large_entities = os.environ.get("SELF_HOSTED_ENTITIES", "works,authors").split(",")
+            entity = entry.get("entity", "")
+            if shard_count >= self_hosted_threshold or entity in large_entities:
+                entry["runner"] = self_hosted_label
+            else:
+                entry["runner"] = managed_label
+    elif entries:
+        for entry in entries:
+            entry["runner"] = managed_label
+
     matrix_json = json.dumps({"include": entries}, separators=(',', ':'))
 
-    # Compute dynamic parallelism:
-    # - Scale with job count: min(total, ceiling)
-    # - Cap at GitHub concurrent limit (20 for free tier)
-    # - Floor of 1
-    # - Rate-limit safe: with per-shard uploads, each job makes multiple
-    #   upload_large_folder calls. Cap keeps HF API pressure reasonable.
-    GITHUB_MAX_CONCURRENT = 5  # Reduced from 20 to avoid HF 429 rate limits
-    max_parallel = min(len(entries), GITHUB_MAX_CONCURRENT) if entries else 1
+    # Compute dynamic parallelism per runner pool.
+    # Managed: capped at 5 to avoid HF 429 rate limits.
+    # Self-hosted: capped at 3 (still HF rate limited, but no GitHub limit).
+    # Total max-parallel is the sum — GitHub enforces this across all entries.
+    MANAGED_MAX = 5
+    SELF_HOSTED_MAX = 3
+    managed_jobs = sum(1 for e in entries if e.get("runner") == managed_label)
+    self_hosted_jobs = sum(1 for e in entries if e.get("runner") == self_hosted_label)
+    max_parallel = min(managed_jobs, MANAGED_MAX) + min(self_hosted_jobs, SELF_HOSTED_MAX)
+    max_parallel = max(1, max_parallel)
 
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
@@ -941,6 +971,8 @@ def _emit_matrix(entries: list[dict]) -> None:
     else:
         print(matrix_json)
         print(f"max_parallel={max_parallel}")
+        if self_hosted_label:
+            print(f"Runner split: {managed_jobs} managed, {self_hosted_jobs} self-hosted")
 
 
 def _run_cli(args: argparse.Namespace) -> None:
