@@ -389,6 +389,7 @@ def detect_new_shards(
     from huggingface_hub import HfApi
     api = HfApi()
 
+    from sync.common import SNAPSHOT_DIR
     from sync.schema import _discover_entities
     entities = (
         [entity_filter] if entity_filter else _discover_entities(SNAPSHOT_DIR)
@@ -589,6 +590,7 @@ def sync_shards(
 
     # Flatten to ordered list of (entity, s3_key) pairs
     queue: list[tuple[str, str]] = []
+    from sync.common import SNAPSHOT_DIR
     from sync.schema import _discover_entities
     all_entities = _discover_entities(SNAPSHOT_DIR)
     if batch_keys:
