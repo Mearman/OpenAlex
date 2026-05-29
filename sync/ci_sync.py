@@ -14,6 +14,7 @@ for parallel sync.
 from __future__ import annotations
 
 import os
+
 os.environ.setdefault("TQDM_DISABLE", "1")
 
 import json
@@ -579,6 +580,7 @@ def sync_shards(
             computed from entity relationship counts).
     """
     from concurrent.futures import ThreadPoolExecutor
+
     from huggingface_hub import HfApi
 
     if new_shards is None:
