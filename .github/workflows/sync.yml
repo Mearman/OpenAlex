@@ -1,6 +1,11 @@
 name: Sync OpenAlex Snapshot
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'sync/**'
+      - '.github/workflows/sync.yml'
   schedule:
     - cron: '0 6 * * 1'  # Weekly Monday 06:00 UTC
   workflow_dispatch:
