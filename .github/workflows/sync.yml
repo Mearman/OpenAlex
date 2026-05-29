@@ -129,7 +129,16 @@ jobs:
       - name: Sync ${{ matrix.entity }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_XET_HIGH_PERFORMANCE: "1"
+          # Stagger starts to avoid all jobs hitting HF API simultaneously.
+          # Each job sleeps a random 0–30s before starting work.
+          SYNC_STAGGER_MAX: "30"
         run: |
+          STAGGER=$(( RANDOM % ${SYNC_STAGGER_MAX:-0} ))
+          if [ "$STAGGER" -gt 0 ]; then
+            echo "Staggering start by ${STAGGER}s to spread HF API load"
+            sleep "$STAGGER"
+          fi
           python3 -m sync.ci_sync sync \
             --entity "${{ matrix.entity }}" \
             --batch "${{ matrix.batch }}" \

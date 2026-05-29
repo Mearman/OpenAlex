@@ -473,7 +473,6 @@ def detect_new_shards(
                         "Shard %s: %d/%d rel types present",
                         shard_key, len(present_rels), expected_count,
                     )
-                    missing_parquet.append(s3_key)
 
             log.info(
                 "Entity %s: %d missing source, %d incomplete parquet "
@@ -541,6 +540,39 @@ def prepare_matrix(
             })
 
     return matrix
+
+
+def _retry_wait_from_error(
+    exc: Exception,
+    attempt: int,
+    base_wait: float = 30,
+    max_wait: float = 240,
+) -> float:
+    """Compute retry wait time, preferring rate-limit headers over backoff.
+
+    When the exception chain contains an ``httpx.HTTPStatusError`` with
+    a 429 response, parses the ``ratelimit-reset`` header for the exact
+    server-advised wait. Falls back to exponential backoff otherwise.
+    """
+    import httpx as _httpx
+
+    # Walk the exception chain looking for an httpx.HTTPStatusError
+    chain: BaseException | None = exc
+    while chain is not None:
+        if isinstance(chain, _httpx.HTTPStatusError) and chain.response.status_code == 429:
+            headers = chain.response.headers
+            reset = headers.get("ratelimit-reset") or headers.get("retry-after")
+            if reset:
+                try:
+                    return float(reset) + 1  # +1s for rounding
+                except (ValueError, TypeError):
+                    pass
+            # 429 but no header — use generous fixed wait
+            return 60.0
+        chain = chain.__cause__ or chain.__context__
+
+    # Not a 429 — exponential backoff
+    return min(max_wait, base_wait * (2 ** attempt))
 
 
 # ── Sync ─────────────────────────────────────────────────────────────────
@@ -619,7 +651,10 @@ def sync_shards(
     # Batch uploads to reduce HF API calls. Per-shard uploads caused
     # 429 rate limits when 20 parallel jobs each hit the API per shard.
     # Disk guard triggers early upload when free space is low.
-    UPLOAD_EVERY = 5
+    # Higher UPLOAD_EVERY = fewer API calls = fewer 429s. 10 is safe on
+    # GitHub runners (14GB disk) even for works (18 rel types × 10 shards
+    # ≈ 180 parquets + 10 source files ≈ 3–4GB peak).
+    UPLOAD_EVERY = int(os.environ.get("UPLOAD_EVERY", "10"))
     DISK_GUARD_MB = 2048  # 2 GB minimum free space
 
     results: list[SyncResult] = []
@@ -643,11 +678,19 @@ def sync_shards(
     outstanding_future: Future[None] | None = None
 
     def _upload_and_clean(label: str) -> None:
-        """Upload upload_dir to HF, then clean all files."""
+        """Upload upload_dir to HF, then clean all files.
+
+        Uses rate-limit-aware retry: on 429 responses, reads the
+        ``ratelimit-reset`` header for the exact wait time instead of
+        guessing with exponential backoff. Falls back to exponential
+        backoff (30s base, 4x cap) for non-rate-limit errors.
+        """
         nonlocal uploaded_count
         print(f"Uploading {label}...")
         api = HfApi()
         max_retries = 5
+        base_wait = 30  # seconds
+        max_wait = 240  # seconds
         for attempt in range(max_retries):
             try:
                 api.upload_large_folder(
@@ -672,8 +715,8 @@ def sync_shards(
                 return
             except Exception as exc:
                 if attempt < max_retries - 1:
-                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, 240s
-                    print(f"  Upload FAILED ({label}), retry {attempt + 1}/{max_retries} in {wait}s: {exc}")
+                    wait = _retry_wait_from_error(exc, attempt, base_wait, max_wait)
+                    print(f"  Upload FAILED ({label}), retry {attempt + 1}/{max_retries} in {wait:.0f}s: {exc}")
                     time.sleep(wait)
                 else:
                     print(f"  Upload FAILED ({label}) after {max_retries} retries: {exc}")
