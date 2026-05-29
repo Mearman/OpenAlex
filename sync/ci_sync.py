@@ -448,44 +448,63 @@ def detect_new_shards(
         if state is not None:
             hf_source_files, parquet_rel_keys, parquet_paths = state
 
-            all_rel_types = {k.split("/", 1)[0] for k in parquet_rel_keys}
-            # Use the known relationship type count for this entity, not
-            # what's currently on HF. Deriving from HF means a shard
-            # with only 10 of 18 rel types looks "complete" if those
-            # 10 are the only rel types on HF — a false negative.
-            expected_count = _ENTITY_REL_COUNTS.get(entity, len(all_rel_types))
-
+            # Build per-shard rel sets from HF parquet state
             shard_rels: dict[str, set[str]] = {}
             for rk in parquet_rel_keys:
                 rel, shard_key = rk.split("/", 1)
                 shard_rels.setdefault(shard_key, set()).add(rel)
 
-            missing_source = []
-            has_source = []
-            for s3_key in manifest:
-                hf_path = _s3_key_to_hf_path(s3_key)
-                if hf_path not in hf_source_files:
-                    missing_source.append(s3_key)
-                else:
-                    has_source.append(s3_key)
+            # Determine expected rel count per shard.
+            # Prefer the schema-derived count (available when local snapshot
+            # or schema cache exists). Fall back to the maximum rel count
+            # observed across any valid shard on HF — this handles CI where
+            # neither local snapshot nor schema cache is available.
+            expected_count = _ENTITY_REL_COUNTS.get(entity, 0)
+            if expected_count == 0:
+                valid_shard_keys = {_s3_key_to_shard_key(k) for k in manifest}
+                for sk in valid_shard_keys:
+                    if sk in shard_rels:
+                        expected_count = max(expected_count, len(shard_rels[sk]))
 
-            missing_parquet = []
-            for s3_key in has_source:
-                shard_key = _s3_key_to_shard_key(s3_key)
-                present_rels = shard_rels.get(shard_key, set())
-                if len(present_rels) < expected_count:
-                    missing_parquet.append(s3_key)
-                    log.debug(
-                        "Shard %s: %d/%d rel types present",
-                        shard_key, len(present_rels), expected_count,
-                    )
+            # If still 0, we have no basis for completeness checking —
+            # skip parquet gap detection for this entity.
+            if expected_count == 0:
+                log.info(
+                    "Entity %s: no schema and no HF parquets, "
+                    "skipping parquet completeness check",
+                    entity,
+                )
+                new_for_entity = missing_source
+            else:
 
-            log.info(
-                "Entity %s: %d missing source, %d incomplete parquet "
-                "(expected %d rel types, found %d on HF)",
-                entity, len(missing_source), len(missing_parquet),
-                expected_count, len(all_rel_types),
-            )
+                missing_source = []
+                has_source = []
+                for s3_key in manifest:
+                    hf_path = _s3_key_to_hf_path(s3_key)
+                    if hf_path not in hf_source_files:
+                        missing_source.append(s3_key)
+                    else:
+                        has_source.append(s3_key)
+
+                missing_parquet = []
+                for s3_key in has_source:
+                    shard_key = _s3_key_to_shard_key(s3_key)
+                    present_rels = shard_rels.get(shard_key, set())
+                    if len(present_rels) < expected_count:
+                        missing_parquet.append(s3_key)
+                        log.debug(
+                            "Shard %s: %d/%d rel types present",
+                            shard_key, len(present_rels), expected_count,
+                        )
+
+                log.info(
+                    "Entity %s: %d missing source, %d incomplete parquet "
+                    "(expected %d rel types)",
+                    entity, len(missing_source), len(missing_parquet),
+                    expected_count,
+                )
+
+                new_for_entity = missing_source + missing_parquet
 
             # --- Orphan detection (S3 is SSOT) ---
             valid_hf_paths = {_s3_key_to_hf_path(k) for k in manifest}
@@ -508,8 +527,6 @@ def detect_new_shards(
                     "Entity %s: %d orphan source, %d orphan parquet",
                     entity, len(orphan_src), len(orphan_pq),
                 )
-
-            new_for_entity = missing_source + missing_parquet
         else:
             new_for_entity = []
             for s3_key in manifest:
