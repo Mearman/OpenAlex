@@ -466,8 +466,18 @@ def detect_new_shards(
                     if sk in shard_rels:
                         expected_count = max(expected_count, len(shard_rels[sk]))
 
-            # If still 0, we have no basis for completeness checking —
-            # skip parquet gap detection for this entity.
+            # Classify manifest shards by source availability
+            missing_source = []
+            has_source = []
+            for s3_key in manifest:
+                hf_path = _s3_key_to_hf_path(s3_key)
+                if hf_path not in hf_source_files:
+                    missing_source.append(s3_key)
+                else:
+                    has_source.append(s3_key)
+
+            # If expected_count is still 0, we have no basis for
+            # completeness checking — skip parquet gap detection.
             if expected_count == 0:
                 log.info(
                     "Entity %s: no schema and no HF parquets, "
@@ -476,16 +486,6 @@ def detect_new_shards(
                 )
                 new_for_entity = missing_source
             else:
-
-                missing_source = []
-                has_source = []
-                for s3_key in manifest:
-                    hf_path = _s3_key_to_hf_path(s3_key)
-                    if hf_path not in hf_source_files:
-                        missing_source.append(s3_key)
-                    else:
-                        has_source.append(s3_key)
-
                 missing_parquet = []
                 for s3_key in has_source:
                     shard_key = _s3_key_to_shard_key(s3_key)
