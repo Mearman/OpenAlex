@@ -799,8 +799,9 @@ def sync_shards(
         for r in results:
             f.write(json.dumps(r) + "\n")
 
-    print(f"Done: {succeeded} succeeded, {failed} failed out of {total}")
-    if failed > 0:
+    never_uploaded = succeeded - uploaded_count
+    print(f"Done: {succeeded} succeeded, {failed} failed, {never_uploaded} never uploaded out of {total}")
+    if failed > 0 or never_uploaded > 0:
         sys.exit(1)
 
 # ── Cleanup ────────────────────────────────────────────────────────────
