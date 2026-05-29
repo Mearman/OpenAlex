@@ -108,6 +108,9 @@ _REL_NAME_OVERRIDES: dict[str, dict[str, str]] = {
         "topic_share": "author_topic_share",
         "sources": "author_sources",
     },
+    "concepts": {
+        "related_concepts": "concept_related",
+    },
     "works": {
         "authorships": "work_authorships",
         "authorships_institutions": "work_authorship_institutions",
@@ -129,6 +132,73 @@ def _rel_name(entity: str, json_key: str, default: str) -> str:
     return overrides.get(json_key, default)
 
 
+# Column-name overrides for the ID column produced by each field.
+# Pattern handlers auto-derive column names from id_path or json_key,
+# but the hardcoded extractors used different conventions. This mapping
+# preserves backward compatibility with existing parquet data.
+#
+# Format: {entity: {json_key: target_col_name}}
+_TARGET_COL_OVERRIDES: dict[str, dict[str, str]] = {
+    "works": {
+        # nested_id_ref: author.id → "author_id" not "authorship_id"
+        "authorships": "author_id",
+        # url_list: referenced_works → "referenced_work_id" not "referenced_works_id"
+        "referenced_works": "referenced_work_id",
+        "related_works": "related_work_id",
+        "corresponding_author_ids": "author_id",
+        "corresponding_institution_ids": "institution_id",
+        "funded_outputs": "work_id",
+    },
+    "authors": {
+        "affiliations": "institution_id",
+        "last_known_institutions": "institution_id",
+        "x_concepts": "concept_id",
+    },
+    "sources": {
+        "host_organization_lineage": "publisher_id",
+    },
+    "institutions": {
+        "associated_institutions": "associated_institution_id",
+        "lineage": "ancestor_institution_id",
+        "repositories": "source_id",
+    },
+    "publishers": {
+        "lineage": "ancestor_publisher_id",
+    },
+    "concepts": {
+        "ancestors": "ancestor_concept_id",
+        "related_concepts": "related_concept_id",
+    },
+}
+
+
+# Column renames within extra_cols.
+# Format: {entity: {json_key: {json_col_name: parquet_col_name}}}
+_COL_RENAME_OVERRIDES: dict[str, dict[str, dict[str, str]]] = {
+    "institutions": {
+        "associated_institutions": {"relationship": "relationship_type"},
+    },
+}
+
+
+def _target_col(entity: str, json_key: str, auto_derived: str) -> str:
+    """Return the target column name, applying overrides if set."""
+    overrides = _TARGET_COL_OVERRIDES.get(entity, {})
+    return overrides.get(json_key, auto_derived)
+
+
+# Override extra_cols for specific entity+field combinations.
+# The probe auto-derives extra_cols from scalar fields in the record,
+# but some hardcoded extractors carry different subsets.
+_EXTRA_COLS_OVERRIDES: dict[str, dict[str, list[str]]] = {
+    "works": {
+        # Hardcoded work_topics only has score, not count
+        "topics": ["score"],
+        "concepts": ["score"],
+    },
+}
+
+
 # ── Schema types ────────────────────────────────────────────────────────
 
 
@@ -141,6 +211,11 @@ class FieldSchema:
         pattern: Extraction pattern name (e.g. "id_ref", "url_list")
         rel_name: Output relationship table name (e.g. "work_authorships")
         id_path: Dot-path to the ID within each element (e.g. "author.id")
+        target_col: Explicit name for the ID column (e.g. "author_id").
+            When set, overrides the auto-derived column name in pattern
+            handlers. Required for backward compatibility with existing
+            parquet data whose column names don't follow the auto-derivation
+            rules.
         extra_cols: Scalar fields to carry as columns (e.g. ["score", "count"])
         nested: Sub-array schemas for nested extraction
         col_renames: Rename columns from JSON key → parquet column
@@ -151,6 +226,7 @@ class FieldSchema:
     pattern: str
     rel_name: str
     id_path: str | None = None
+    target_col: str | None = None
     extra_cols: list[str] = field(default_factory=list)
     nested: list[FieldSchema] = field(default_factory=list)
     col_renames: dict[str, str] = field(default_factory=dict)
@@ -164,6 +240,8 @@ class FieldSchema:
         }
         if self.id_path:
             d["id_path"] = self.id_path
+        if self.target_col:
+            d["target_col"] = self.target_col
         if self.extra_cols:
             d["extra_cols"] = self.extra_cols
         if self.nested:
@@ -181,6 +259,7 @@ class FieldSchema:
             pattern=d["pattern"],
             rel_name=d["rel_name"],
             id_path=d.get("id_path"),
+            target_col=d.get("target_col"),
             extra_cols=d.get("extra_cols", []),
             nested=[cls.from_dict(n) for n in d.get("nested", [])],
             col_renames=d.get("col_renames", {}),
@@ -251,17 +330,19 @@ def _pattern_url_list(
     items: list[Any],
     fs: FieldSchema,
     entity_id_col: str,
+    entity: str = "",
 ) -> dict[str, list[dict]]:
     """Pattern: list of OpenAlex URL strings → {entity}_id + {target}_id."""
-    target_name = fs.json_key
-    # Derive target column name from the relationship name
-    # e.g. "work_references" → "referenced_work_id"
-    # "source_host_lineage" → "publisher_id"
+    # Use explicit target_col if set, otherwise derive from json_key
+    target_name = fs.target_col
+    if target_name is None:
+        auto = fs.json_key.rstrip("s") + "_id"
+        target_name = _target_col(entity, fs.json_key, auto)
     rows: list[dict] = []
     for url in items:
         target_id = extract_id(url)
         if target_id is not None:
-            rows.append({entity_id_col: entity_id, target_name + "_id": target_id})
+            rows.append({entity_id_col: entity_id, target_name: target_id})
     return {fs.rel_name: rows} if rows else {}
 
 
@@ -270,6 +351,7 @@ def _pattern_id_ref(
     items: list[dict],
     fs: FieldSchema,
     entity_id_col: str,
+    entity: str = "",
 ) -> dict[str, list[dict]]:
     """Pattern: list of dicts with an ID field + optional scalar fields."""
     id_path = fs.id_path or "id"
@@ -279,21 +361,27 @@ def _pattern_id_ref(
         if target_id is None:
             continue
         row: dict[str, Any] = {entity_id_col: entity_id}
-        # Derive target column from id_path leaf
-        id_leaf = id_path.rsplit(".", 1)[-1]
-        target_col = id_leaf + "_id" if id_leaf != "id" else fs.json_key.rstrip("s") + "_id"
+        # Use explicit target_col if set, otherwise auto-derive
+        if fs.target_col:
+            target_col = fs.target_col
+        else:
+            id_leaf = id_path.rsplit(".", 1)[-1]
+            auto = id_leaf + "_id" if id_leaf != "id" else fs.json_key.rstrip("s") + "_id"
+            target_col = _target_col(entity, fs.json_key, auto)
         row[target_col] = target_id
         for col in fs.extra_cols:
             val = item.get(col)
             if val is not None:
+                # Apply column rename if configured
+                out_col = fs.col_renames.get(col, col)
                 if isinstance(val, float):
-                    row[col] = val
+                    row[out_col] = val
                 elif isinstance(val, int):
-                    row[col] = val
+                    row[out_col] = val
                 elif isinstance(val, bool):
-                    row[col] = val
+                    row[out_col] = val
                 else:
-                    row[col] = val
+                    row[out_col] = val
         rows.append(row)
     return {fs.rel_name: rows} if rows else {}
 
@@ -303,6 +391,7 @@ def _pattern_nested_id_ref(
     items: list[dict],
     fs: FieldSchema,
     entity_id_col: str,
+    entity: str = "",
 ) -> dict[str, list[dict]]:
     """Pattern: list of dicts with an ID field, scalar extras, and
     sub-arrays that themselves produce relationship tables.
@@ -319,8 +408,13 @@ def _pattern_nested_id_ref(
         if target_id is None:
             continue
         row: dict[str, Any] = {entity_id_col: entity_id}
-        id_leaf = id_path.rsplit(".", 1)[-1]
-        target_col = id_leaf + "_id" if id_leaf != "id" else fs.json_key.rstrip("s") + "_id"
+        # Use explicit target_col if set, otherwise auto-derive
+        if fs.target_col:
+            target_col = fs.target_col
+        else:
+            id_leaf = id_path.rsplit(".", 1)[-1]
+            auto = id_leaf + "_id" if id_leaf != "id" else fs.json_key.rstrip("s") + "_id"
+            target_col = _target_col(entity, fs.json_key, auto)
         row[target_col] = target_id
         for col in fs.extra_cols:
             val = item.get(col)
@@ -341,8 +435,13 @@ def _pattern_nested_id_ref(
                 nrow: dict[str, Any] = {entity_id_col: entity_id}
                 # Thread the parent target ID for join-back
                 nrow[target_col] = target_id
-                sub_leaf = nested_id_path.rsplit(".", 1)[-1]
-                sub_col = sub_leaf + "_id" if sub_leaf != "id" else nested_fs.json_key.rstrip("s") + "_id"
+                # Nested target col
+                if nested_fs.target_col:
+                    sub_col = nested_fs.target_col
+                else:
+                    sub_leaf = nested_id_path.rsplit(".", 1)[-1]
+                    sub_auto = sub_leaf + "_id" if sub_leaf != "id" else nested_fs.json_key.rstrip("s") + "_id"
+                    sub_col = sub_auto
                 nrow[sub_col] = sub_id
                 for col in nested_fs.extra_cols:
                     val = sub.get(col)
@@ -684,12 +783,43 @@ def _pattern_locations(
     return {fs.rel_name: rows} if rows else {}
 
 
+def _pattern_slug_ref(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+    entity: str = "",
+) -> dict[str, list[dict]]:
+    """Pattern: list of dicts with an ID URL → slug string + optional score.
+
+    Unlike id_ref which extracts numeric IDs, this extracts the URL tail
+    as a string slug (e.g. "machine-learning"). Used for keywords.
+    """
+    id_path = fs.id_path or "id"
+    rows: list[dict] = []
+    target_col = fs.target_col or (fs.json_key.rstrip("s") + "_id")
+    for item in items:
+        raw = _resolve_nested(item, id_path)
+        slug = None
+        if isinstance(raw, str) and raw:
+            slug = raw.rsplit("/", 1)[-1]
+        if slug:
+            row: dict[str, Any] = {entity_id_col: entity_id, target_col: slug}
+            for col in fs.extra_cols:
+                val = item.get(col)
+                if val is not None:
+                    row[col] = float(val) if col == "score" else val
+            rows.append(row)
+    return {fs.rel_name: rows} if rows else {}
+
+
 # ── Pattern dispatch ───────────────────────────────────────────────────
 
 _PATTERN_DISPATCH: dict[str, Any] = {
     "url_list": _pattern_url_list,
     "id_ref": _pattern_id_ref,
     "nested_id_ref": _pattern_nested_id_ref,
+    "slug_ref": _pattern_slug_ref,
     "time_series": _pattern_time_series,
     "external_ids": _pattern_external_ids,
     "string_list": _pattern_string_list,
@@ -720,9 +850,9 @@ def extract_relationships(
     Returns {rel_name: [row_dict, ...]} for each relationship type
     that has data in this record.
     """
-    entity_id = extract_id(_resolve_nested(record, schema.id_path))
+    entity_id: int | str | None = extract_id(_resolve_nested(record, schema.id_path))
     if entity_id is None:
-        # Non-numeric IDs (continents, countries) — use string tail
+        # Non-numeric IDs (continents, countries, subfields) — use string tail
         raw_id = _resolve_nested(record, schema.id_path)
         if isinstance(raw_id, str) and raw_id:
             entity_id = raw_id.rsplit("/", 1)[-1]
@@ -747,13 +877,21 @@ def extract_relationships(
             log.warning("Unknown pattern %s for field %s", fs.pattern, fs.json_key)
             continue
 
+        # Build handler args — only pass entity to handlers that accept it
+        handler_args = (entity_id, value, fs, schema.id_col)
+        import inspect as _inspect
+        _sig = _inspect.signature(handler)
+        kwargs = {}
+        if "entity" in _sig.parameters:
+            kwargs["entity"] = schema.entity
+
         # Some patterns expect a single dict, not an array
         if fs.is_singular_dict:
             if not isinstance(value, dict):
                 continue
-            extracted = handler(entity_id, value, fs, schema.id_col)
+            extracted = handler(*handler_args, **kwargs)
         else:
-            extracted = handler(entity_id, value, fs, schema.id_col)
+            extracted = handler(*handler_args, **kwargs)
 
         for rel_name, rows in extracted.items():
             result.setdefault(rel_name, []).extend(rows)
@@ -897,6 +1035,26 @@ def _classify_field(
                 id_path="id",
                 is_singular_dict=True,
             ))
+        # Single investigator: dict with given_name/family_name
+        # (lead_investigator, co_lead_investigator in awards)
+        elif "given_name" in value and "family_name" in value:
+            inv_fs = FieldSchema(
+                json_key=key, pattern="investigators",
+                rel_name=f"{rel_prefix}investigators",
+                is_singular_dict=True,
+                col_renames={
+                    "is_lead": key == "lead_investigator",
+                    "is_co_lead": key == "co_lead_investigator",
+                },
+                nested=[
+                    FieldSchema(
+                        json_key="affiliation",
+                        pattern="investigators",
+                        rel_name=f"{rel_prefix}investigator_affiliations",
+                    ),
+                ],
+            )
+            fields.append(inv_fs)
         # Otherwise skip (metadata wrapper like biblio, open_access, etc.)
         return fields
 
@@ -913,6 +1071,14 @@ def _classify_field(
 
         # List of strings
         if isinstance(first, str):
+            # ISSN list: key is "issn" and strings look like ISSNs (digits-xdigits)
+            if key == "issn":
+                fields.append(FieldSchema(
+                    json_key=key, pattern="issn",
+                    rel_name=f"{rel_prefix}issns",
+                ))
+                return fields
+
             # URL list: strings containing openalex.org or https://
             if any("openalex.org" in s or s.startswith("https://") for s in value[:5]):
                 fields.append(FieldSchema(
@@ -963,6 +1129,19 @@ def _classify_field(
                     json_key=key, pattern="time_series",
                     rel_name=f"{rel_prefix}counts_by_year",
                     extra_cols=numeric_cols,
+                ))
+                return fields
+
+            # Keyword-like dicts: have 'id' with /keywords/ URL + 'score'
+            # These use slug IDs (strings), not numeric
+            raw_id = first.get("id", "")
+            if isinstance(raw_id, str) and "/keywords/" in raw_id:
+                fields.append(FieldSchema(
+                    json_key=key, pattern="slug_ref",
+                    rel_name=f"{rel_prefix}{key}",
+                    id_path="id",
+                    target_col=f"{key.rstrip('s')}_id",
+                    extra_cols=["score"],
                 ))
                 return fields
 
@@ -1132,9 +1311,23 @@ def probe_schema(entity: str, record: dict) -> EntitySchema:
         # Apply naming overrides for backward compatibility
         for f in new_fields:
             f.rel_name = _rel_name(entity, f.json_key, f.rel_name)
+            # Apply target column overrides
+            col_overrides = _TARGET_COL_OVERRIDES.get(entity, {})
+            if f.json_key in col_overrides and f.target_col is None:
+                f.target_col = col_overrides[f.json_key]
+            # Apply extra_cols overrides
+            extra_overrides = _EXTRA_COLS_OVERRIDES.get(entity, {})
+            if f.json_key in extra_overrides:
+                f.extra_cols = extra_overrides[f.json_key]
+            # Apply column renames
+            col_rename = _COL_RENAME_OVERRIDES.get(entity, {}).get(f.json_key, {})
+            if col_rename:
+                f.col_renames = {**f.col_renames, **col_rename}
             for n in f.nested:
                 compound_key = f.json_key + "_" + n.json_key
                 n.rel_name = _rel_name(entity, compound_key, n.rel_name)
+                if n.json_key in col_overrides and n.target_col is None:
+                    n.target_col = col_overrides[n.json_key]
         fields.extend(new_fields)
 
     schema = EntitySchema(
@@ -1182,11 +1375,25 @@ def probe_schema_multi(entity: str, records: list[dict]) -> EntitySchema:
             new_fields = _classify_field(key, value, entity, all_keys)
             for f in new_fields:
                 f.rel_name = _rel_name(entity, f.json_key, f.rel_name)
+                # Apply target column overrides
+                col_overrides = _TARGET_COL_OVERRIDES.get(entity, {})
+                if f.json_key in col_overrides and f.target_col is None:
+                    f.target_col = col_overrides[f.json_key]
+                # Apply extra_cols overrides
+                extra_overrides = _EXTRA_COLS_OVERRIDES.get(entity, {})
+                if f.json_key in extra_overrides:
+                    f.extra_cols = extra_overrides[f.json_key]
+                # Apply column renames
+                col_rename = _COL_RENAME_OVERRIDES.get(entity, {}).get(f.json_key, {})
+                if col_rename:
+                    f.col_renames = {**f.col_renames, **col_rename}
                 for n in f.nested:
                     # Nested fields: override by compound key (parent_sub)
                     # e.g. authorships_institutions
                     compound_key = f.json_key + "_" + n.json_key
                     n.rel_name = _rel_name(entity, compound_key, n.rel_name)
+                    if n.json_key in col_overrides and n.target_col is None:
+                        n.target_col = col_overrides[n.json_key]
                 if f.rel_name not in seen_rel_names:
                     seen_rel_names[f.rel_name] = f
 
