@@ -659,28 +659,36 @@ def sync_shards(
         nonlocal uploaded_count
         print(f"Uploading {label}...")
         api = HfApi()
-        try:
-            api.upload_large_folder(
-                folder_path=str(upload_dir),
-                repo_id=HF_REPO_ID,
-                repo_type="dataset",
-                ignore_patterns=["._*"],
-            )
-            uploaded_count = succeeded
-            print(f"  Upload complete ({label})")
-            # Clean all files from upload dir to free disk
-            for p in upload_dir.rglob("*"):
-                if p.is_file():
-                    p.unlink(missing_ok=True)
-            # Remove empty directories
-            for p in sorted(upload_dir.rglob("*"), reverse=True):
-                if p.is_dir():
-                    try:
-                        p.rmdir()
-                    except OSError:
-                        pass
-        except Exception as exc:
-            print(f"  Upload FAILED ({label}): {exc}")
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                api.upload_large_folder(
+                    folder_path=str(upload_dir),
+                    repo_id=HF_REPO_ID,
+                    repo_type="dataset",
+                    ignore_patterns=["._*"],
+                )
+                uploaded_count = succeeded
+                print(f"  Upload complete ({label})")
+                # Clean all files from upload dir to free disk
+                for p in upload_dir.rglob("*"):
+                    if p.is_file():
+                        p.unlink(missing_ok=True)
+                # Remove empty directories
+                for p in sorted(upload_dir.rglob("*"), reverse=True):
+                    if p.is_dir():
+                        try:
+                            p.rmdir()
+                        except OSError:
+                            pass
+                return
+            except Exception as exc:
+                if attempt < max_retries - 1:
+                    wait = 30 * (2 ** attempt)  # 30s, 60s, 120s, 240s
+                    print(f"  Upload FAILED ({label}), retry {attempt + 1}/{max_retries} in {wait}s: {exc}")
+                    time.sleep(wait)
+                else:
+                    print(f"  Upload FAILED ({label}) after {max_retries} retries: {exc}")
 
     def _disk_free_mb() -> float:
         """Free disk space in MB at the staging root."""
@@ -821,7 +829,7 @@ def _emit_matrix(entries: list[dict]) -> None:
     # - Floor of 1
     # - Rate-limit safe: with per-shard uploads, each job makes multiple
     #   upload_large_folder calls. Cap keeps HF API pressure reasonable.
-    GITHUB_MAX_CONCURRENT = 20
+    GITHUB_MAX_CONCURRENT = 5  # Reduced from 20 to avoid HF 429 rate limits
     max_parallel = min(len(entries), GITHUB_MAX_CONCURRENT) if entries else 1
 
     github_output = os.environ.get("GITHUB_OUTPUT")
