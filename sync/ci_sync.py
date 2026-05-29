@@ -813,7 +813,7 @@ def cleanup_tmp_files(entity_filter: str | None = None) -> None:
     leaked into parquet shard keys. Scans each entity/rel_type directory on HF
     for files matching ``__tmp__*`` and deletes them in batches.
     """
-    import requests
+    import httpx
 
     entities = ["works", "authors", "sources", "institutions", "publishers",
                 "funders", "concepts", "topics", "subfields", "fields",
@@ -827,14 +827,14 @@ def cleanup_tmp_files(entity_filter: str | None = None) -> None:
 
     for entity in entities:
         # List subdirectories (relationship types) under this entity
-        resp = requests.get(base_url, params={"path": f"data/{entity}"}, timeout=30)
+        resp = httpx.get(base_url, params={"path": f"data/{entity}"}, timeout=30)
         if resp.status_code != 200:
             print(f"  {entity}: HTTP {resp.status_code}, skipping")
             continue
         dirs = [e["path"] for e in resp.json() if e.get("type") == "directory"]
 
         for d in dirs:
-            resp2 = requests.get(base_url, params={"path": d}, timeout=30)
+            resp2 = httpx.get(base_url, params={"path": d}, timeout=30)
             if resp2.status_code != 200:
                 continue
             tmp_in_dir = [e["path"] for e in resp2.json()
