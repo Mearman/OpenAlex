@@ -28,6 +28,10 @@ from pathlib import Path
 import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
+from huggingface_hub import HfApi
+
+from sync.common import SNAPSHOT_DIR
+from sync.schema import _discover_entities
 
 S3_BUCKET = "openalex"
 HF_REPO_ID = "Mearman/OpenAlex"
@@ -387,11 +391,8 @@ def detect_new_shards(
       new_shards: {entity: [s3_key, ...]} for each entity with gaps
       shard_sizes: {s3_key: size_in_bytes} from manifest or S3 listing
     """
-    from huggingface_hub import HfApi
     api = HfApi()
 
-    from sync.common import SNAPSHOT_DIR
-    from sync.schema import _discover_entities
     entities = (
         [entity_filter] if entity_filter else _discover_entities(SNAPSHOT_DIR)
     )
@@ -592,8 +593,6 @@ def sync_shards(
 
     # Flatten to ordered list of (entity, s3_key) pairs
     queue: list[tuple[str, str]] = []
-    from sync.common import SNAPSHOT_DIR
-    from sync.schema import _discover_entities
     all_entities = _discover_entities(SNAPSHOT_DIR)
     if batch_keys:
         for entity in all_entities:
