@@ -35,7 +35,7 @@ jobs:
       - name: Cleanup __tmp__ files
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python -m sync cleanup
+        run: python3 -m sync.ci_sync cleanup
 
   # ── Detect ───────────────────────────────────────────────────────────
   # Runs once. Finds entities with new/incomplete shards.
