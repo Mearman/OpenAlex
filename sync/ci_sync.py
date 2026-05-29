@@ -206,18 +206,20 @@ def _parquet_path_key(path: str) -> str:
     return f"{parts[-2]}/{filename}"
 
 
-def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[str], set[str]] | None:
+def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[str], set[str], set[str]] | None:
     """List all files on HF for an entity in a single pass.
 
-    Returns (source_files, parquet_rel_keys) or None if listing fails.
-    When cache_dir is provided, caches the listing as JSON to avoid
-    re-listing on subsequent calls within the same run or across runs.
+    Returns (source_files, parquet_rel_keys, parquet_paths) or None if listing fails.
+    - source_files: full HF paths of .jsonl.gz files
+    - parquet_rel_keys: rel/shard_key format for completeness checks
+    - parquet_paths: full HF paths of .parquet files for orphan detection
     """
     from huggingface_hub import HfApi
     api = HfApi()
 
     source_files: set[str] = set()
     parquet_rel_keys: set[str] = set()
+    parquet_paths: set[str] = set()
 
     # Check cache first
     if cache_dir is not None:
@@ -228,13 +230,14 @@ def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[st
                     cached = json.load(f)
                 source_files = set(cached.get("source_files", []))
                 parquet_rel_keys = set(cached.get("parquet_rel_keys", []))
+                parquet_paths = set(cached.get("parquet_paths", []))
                 log.info("Entity %s: loaded from cache (%d src, %d pq)",
                          entity, len(source_files), len(parquet_rel_keys))
-                return source_files, parquet_rel_keys
+                return source_files, parquet_rel_keys, parquet_paths
             except (json.JSONDecodeError, KeyError):
                 log.warning("Cache corrupt for %s, re-fetching", entity)
 
-    def _cache_result(src: set[str], pq: set[str]) -> tuple[set[str], set[str]]:
+    def _cache_result(src: set[str], pq_keys: set[str], pq_paths: set[str]) -> tuple[set[str], set[str], set[str]]:
         """Write result to cache if cache_dir is set."""
         if cache_dir is not None:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -242,11 +245,12 @@ def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[st
             with open(cache_file, "w") as f:
                 json.dump({
                     "source_files": sorted(src),
-                    "parquet_rel_keys": sorted(pq),
+                    "parquet_rel_keys": sorted(pq_keys),
+                    "parquet_paths": sorted(pq_paths),
                 }, f)
             log.info("Entity %s: cached listing (%d src, %d pq)",
-                     entity, len(src), len(pq))
-        return src, pq
+                     entity, len(src), len(pq_keys))
+        return src, pq_keys, pq_paths
 
     try:
         for item in api.list_repo_tree(
@@ -259,7 +263,8 @@ def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[st
                 source_files.add(item.path)
             elif item.path.endswith(".parquet"):
                 parquet_rel_keys.add(_parquet_path_key(item.path))
-        return _cache_result(source_files, parquet_rel_keys)
+                parquet_paths.add(item.path)
+        return _cache_result(source_files, parquet_rel_keys, parquet_paths)
     except Exception as e:
         log.warning("Recursive listing failed for %s: %s", entity, e)
 
@@ -277,6 +282,7 @@ def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[st
 
         source_files.clear()
         parquet_rel_keys.clear()
+        parquet_paths.clear()
         for part_dir in partition_dirs:
             for item in api.list_repo_tree(
                 repo_id=HF_REPO_ID,
@@ -288,7 +294,8 @@ def _hf_entity_state(entity: str, cache_dir: Path | None = None) -> tuple[set[st
                     source_files.add(item.path)
                 elif item.path.endswith(".parquet"):
                     parquet_rel_keys.add(_parquet_path_key(item.path))
-        return _cache_result(source_files, parquet_rel_keys)
+                    parquet_paths.add(item.path)
+        return _cache_result(source_files, parquet_rel_keys, parquet_paths)
     except Exception as e:
         log.warning("Per-partition listing failed for %s: %s", entity, e)
         return None
@@ -380,16 +387,21 @@ def _extract_shard(
 def detect_new_shards(
     entity_filter: str | None = None,
     cache_dir: Path | None = None,
-) -> tuple[dict[str, list[str]], dict[str, int]]:
+) -> tuple[dict[str, list[str]], dict[str, int], dict[str, list[str]]]:
     """Compare S3 manifests against HF to find shards needing sync.
 
     A shard needs syncing if either:
     1. Its source .jsonl.gz file is not on HF, OR
     2. Its source file is on HF but its parquet extractions are incomplete
 
-    Returns (new_shards, shard_sizes) where:
+    Orphan files (source or parquet on HF with no manifest entry) are
+    reported separately for cleanup. S3 is the single source of truth;
+    nothing should exist on HF that isn't derivable from the current manifest.
+
+    Returns (new_shards, shard_sizes, orphans) where:
       new_shards: {entity: [s3_key, ...]} for each entity with gaps
       shard_sizes: {s3_key: size_in_bytes} from manifest or S3 listing
+      orphans: {entity: [hf_path, ...]} for files not backed by manifest
     """
     api = HfApi()
 
@@ -398,6 +410,7 @@ def detect_new_shards(
     )
     new_shards: dict[str, list[str]] = {}
     shard_sizes: dict[str, int] = {}
+    orphans: dict[str, list[str]] = {}
 
     for entity in entities:
         manifest = _fetch_manifest(entity)
@@ -417,7 +430,7 @@ def detect_new_shards(
                  "None" if state is None else f"(src={len(state[0])}, pq={len(state[1])})")
 
         if state is not None:
-            hf_source_files, parquet_rel_keys = state
+            hf_source_files, parquet_rel_keys, parquet_paths = state
 
             all_rel_types = {k.split("/", 1)[0] for k in parquet_rel_keys}
             # Use the known relationship type count for this entity, not
@@ -458,6 +471,28 @@ def detect_new_shards(
                 expected_count, len(all_rel_types),
             )
 
+            # --- Orphan detection (S3 is SSOT) ---
+            valid_hf_paths = {_s3_key_to_hf_path(k) for k in manifest}
+            valid_shard_keys = {_s3_key_to_shard_key(k) for k in manifest}
+
+            orphan_src = sorted(hf_source_files - valid_hf_paths)
+
+            # Orphan parquet: full paths whose shard key isn't in the manifest
+            orphan_pq: list[str] = []
+            for pq_path in parquet_paths:
+                rk = _parquet_path_key(pq_path)
+                _, shard_key = rk.split("/", 1)
+                if shard_key not in valid_shard_keys:
+                    orphan_pq.append(pq_path)
+
+            entity_orphans = orphan_src + orphan_pq
+            if entity_orphans:
+                orphans[entity] = entity_orphans
+                log.info(
+                    "Entity %s: %d orphan source, %d orphan parquet",
+                    entity, len(orphan_src), len(orphan_pq),
+                )
+
             new_for_entity = missing_source + missing_parquet
         else:
             new_for_entity = []
@@ -469,7 +504,7 @@ def detect_new_shards(
         if new_for_entity:
             new_shards[entity] = new_for_entity
 
-    return new_shards, shard_sizes
+    return new_shards, shard_sizes, orphans
 
 
 # ── Matrix generation ────────────────────────────────────────────────────
@@ -489,7 +524,7 @@ def prepare_matrix(
 
     Returns list of matrix entries (dicts with string values).
     """
-    new_shards, shard_sizes = detect_new_shards(entity_filter=entity_filter, cache_dir=cache_dir)
+    new_shards, shard_sizes, orphans = detect_new_shards(entity_filter=entity_filter, cache_dir=cache_dir)
 
     if not new_shards:
         return []
@@ -497,7 +532,7 @@ def prepare_matrix(
     # Write detect results for sync jobs to reuse (avoids re-running detect)
     detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
     with open(detect_path, "w") as f:
-        json.dump({"shards": new_shards}, f)
+        json.dump({"shards": new_shards, "orphans": orphans}, f)
     print(f"Detect results written to {detect_path}")
 
     matrix: list[dict] = []
@@ -585,7 +620,7 @@ def sync_shards(
     from huggingface_hub import HfApi
 
     if new_shards is None:
-        new_shards, _ = detect_new_shards(entity_filter=entity_filter, cache_dir=None)
+        new_shards, _, _ = detect_new_shards(entity_filter=entity_filter, cache_dir=None)
 
     if not new_shards:
         print("No new shards to sync")
@@ -828,69 +863,71 @@ def sync_shards(
 # ── Cleanup ────────────────────────────────────────────────────────────
 
 
-def cleanup_tmp_files(entity_filter: str | None = None) -> None:
-    """Delete __tmp__ prefixed parquet files from HuggingFace.
+def cleanup_orphans(
+    detect_file: str | None = None,
+    entity_filter: str | None = None,
+    cache_dir: Path | None = None,
+) -> None:
+    """Delete orphan files from HuggingFace that have no S3 manifest entry.
 
-    These files were created by a bug where mock snapshot temp directory paths
-    leaked into parquet shard keys. Scans each entity/rel_type directory on HF
-    for files matching ``__tmp__*`` and deletes them in batches.
+    S3 is the single source of truth. Any file on HF (source .jsonl.gz or
+    extracted .parquet) that doesn't correspond to a current manifest entry
+    is an orphan and should be removed.
+
+    When *detect_file* is provided, reads orphan paths from the detect results
+    written by ``detect-entities``. Otherwise runs detect inline.
     """
-    import httpx
     from huggingface_hub import HfApi
+    from huggingface_hub._commit_api import CommitOperationDelete
 
-    entities = ["works", "authors", "sources", "institutions", "publishers",
-                "funders", "concepts", "topics", "subfields", "fields",
-                "domains", "sdgs", "awards"]
+    orphan_paths: dict[str, list[str]] = {}
+
+    if detect_file:
+        with open(detect_file) as f:
+            data = json.load(f)
+        orphan_paths = data.get("orphans", {})
+    else:
+        _, _, orphan_paths = detect_new_shards(
+            entity_filter=entity_filter, cache_dir=cache_dir,
+        )
+
     if entity_filter:
-        entities = [e for e in entities if e == entity_filter]
+        orphan_paths = {entity_filter: orphan_paths.get(entity_filter, [])}
 
-    api = HfApi()
-    base_url = "https://huggingface.co/api/datasets/Mearman/OpenAlex/tree/main"
-    all_tmp: list[str] = []
-
-    for entity in entities:
-        # List subdirectories (relationship types) under this entity
-        resp = httpx.get(base_url, params={"path": f"data/{entity}"}, timeout=30)
-        if resp.status_code != 200:
-            print(f"  {entity}: HTTP {resp.status_code}, skipping")
-            continue
-        dirs = [e["path"] for e in resp.json() if e.get("type") == "directory"]
-
-        for d in dirs:
-            resp2 = httpx.get(base_url, params={"path": d}, timeout=30)
-            if resp2.status_code != 200:
-                continue
-            tmp_in_dir = [e["path"] for e in resp2.json()
-                           if "__tmp__" in e.get("path", "")]
-            if tmp_in_dir:
-                all_tmp.extend(tmp_in_dir)
-                print(f"  {d}: {len(tmp_in_dir)} __tmp__ files")
-            time.sleep(0.5)
-
-        print(f"  {entity}: done")
-
-    if not all_tmp:
-        print("No __tmp__ files found")
+    total = sum(len(v) for v in orphan_paths.values())
+    if not total:
+        print("No orphan files found")
         return
 
-    print(f"\nFound {len(all_tmp)} __tmp__ files, deleting...")
+    print(f"Found {total} orphan files across {len(orphan_paths)} entities:")
+    for entity, paths in sorted(orphan_paths.items()):
+        src = sum(1 for p in paths if p.endswith(".jsonl.gz"))
+        pq = sum(1 for p in paths if p.endswith(".parquet"))
+        print(f"  {entity}: {src} source, {pq} parquet")
 
-    # Delete in batches of 500 (HF API limit per commit)
+    api = HfApi()
     BATCH = 500
-    for i in range(0, len(all_tmp), BATCH):
-        batch = all_tmp[i:i + BATCH]
-        try:
-            api.delete_files(
-                repo_id=HF_REPO_ID,
-                repo_type="dataset",
-                paths=batch,
-                commit_message=f"chore: remove {len(batch)} __tmp__ parquet files",
-            )
-            print(f"  Deleted batch {i // BATCH + 1} ({len(batch)} files)")
-        except Exception as exc:
-            print(f"  Delete FAILED batch {i // BATCH + 1}: {exc}")
+    deleted = 0
+    for entity, paths in sorted(orphan_paths.items()):
+        for i in range(0, len(paths), BATCH):
+            batch = paths[i:i + BATCH]
+            operations = [CommitOperationDelete(path_in_repo=p) for p in batch]
+            try:
+                api.commit(
+                    repo_id=HF_REPO_ID,
+                    repo_type="dataset",
+                    operations=operations,
+                    commit_message=(
+                        f"chore: remove {len(batch)} orphan files "
+                        f"from {entity} ({i // BATCH + 1})"
+                    ),
+                )
+                deleted += len(batch)
+                print(f"  {entity}: deleted batch {i // BATCH + 1} ({len(batch)} files)")
+            except Exception as exc:
+                print(f"  {entity}: delete FAILED batch {i // BATCH + 1}: {exc}")
 
-    print(f"Cleanup complete: {len(all_tmp)} files deleted")
+    print(f"Cleanup complete: {deleted} orphan files deleted")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────
@@ -956,7 +993,7 @@ def _emit_matrix(entries: list[dict]) -> None:
 def _run_cli(args: argparse.Namespace) -> None:
     """Dispatch parsed CLI arguments."""
     if args.command == "detect":
-        shards_found, _ = detect_new_shards(entity_filter=args.entity)
+        shards_found, _, _ = detect_new_shards(entity_filter=args.entity)
         if not shards_found:
             print("No new shards")
         else:
@@ -971,7 +1008,7 @@ def _run_cli(args: argparse.Namespace) -> None:
 
     elif args.command == "detect-entities":
         cache_dir = Path(args.cache_dir) if args.cache_dir else None
-        new_shards, shard_sizes = detect_new_shards(entity_filter=args.entity, cache_dir=cache_dir)
+        new_shards, shard_sizes, orphans = detect_new_shards(entity_filter=args.entity, cache_dir=cache_dir)
 
         detect_path = os.environ.get("DETECT_RESULTS_PATH", "detect_results.json")
         # Build batches first so we can store assignments in detect results
@@ -989,7 +1026,7 @@ def _run_cli(args: argparse.Namespace) -> None:
                 batch_map[entity] = _size_aware_batch(keys, shard_sizes, n_batches, rel_count)
 
         with open(detect_path, "w") as f:
-            json.dump({"shards": new_shards, "batches": batch_map}, f)
+            json.dump({"shards": new_shards, "batches": batch_map, "orphans": orphans}, f)
         print(f"Detect results written to {detect_path}")
 
         # Build matrix entries from batch assignments
@@ -1023,6 +1060,16 @@ def _run_cli(args: argparse.Namespace) -> None:
         else:
             print("No new shards")
 
+        total_orphans = sum(len(v) for v in orphans.values())
+        if total_orphans:
+            print(f"\nOrphans: {total_orphans} files across {len(orphans)} entities")
+            for entity, paths in sorted(orphans.items()):
+                src = sum(1 for p in paths if p.endswith(".jsonl.gz"))
+                pq = sum(1 for p in paths if p.endswith(".parquet"))
+                print(f"  {entity}: {src} source, {pq} parquet")
+        else:
+            print("No orphan files")
+
     elif args.command == "prepare-matrix":
         cache_dir = Path(args.cache_dir) if args.cache_dir else None
         matrix = prepare_matrix(
@@ -1034,7 +1081,11 @@ def _run_cli(args: argparse.Namespace) -> None:
         print(f"Matrix: {len(matrix)} entries")
 
     elif args.command == "cleanup":
-        cleanup_tmp_files(entity_filter=args.entity)
+        cleanup_orphans(
+            detect_file=args.detect_file,
+            entity_filter=args.entity,
+            cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        )
 
     elif args.command == "sync":
         loaded: dict[str, list[str]] | None = None
@@ -1085,7 +1136,11 @@ if __name__ == "__main__":
         help="Load detect results from this file instead of re-running detect",
     )
 
-    cleanup_parser = sub.add_parser("cleanup", help="Delete __tmp__ parquet files from HF")
+    cleanup_parser = sub.add_parser("cleanup", help="Delete orphan files from HF not backed by S3 manifest")
     cleanup_parser.add_argument("--entity", type=str, default=None)
+    cleanup_parser.add_argument("--detect-file", type=str, default=None,
+        help="Read orphan paths from detect results file instead of re-running detect",
+    )
+    cleanup_parser.add_argument("--cache-dir", type=str, default=None)
 
     _run_cli(parser.parse_args())

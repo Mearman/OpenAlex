@@ -19,40 +19,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Cleanup ──────────────────────────────────────────────────────
-  # Runs once. Deletes __tmp__ prefixed parquet files from HF that were
-  # created by a bug in the mock snapshot symlink path resolution.
-
-  cleanup:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-          cache: pip
-
-      - run: pip install -r sync/requirements.txt
-
-      - name: Cleanup __tmp__ files
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python3 -m sync.ci_sync cleanup
-
   # ── Detect ───────────────────────────────────────────────────────────
-  # Runs once. Finds entities with new/incomplete shards.
-  # Outputs entity list as a matrix for per-entity sync jobs.
+  # Runs once. Finds entities with new/incomplete shards AND orphan files
+  # on HF that have no S3 manifest entry. Outputs entity list as a matrix
+  # for per-entity sync jobs. Writes detect results (including orphans) for
+  # the cleanup and sync jobs to reuse.
 
   detect:
-    needs: cleanup
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       has_new: ${{ steps.detect.outputs.has_new }}
       matrix: ${{ steps.detect.outputs.matrix }}
       max_parallel: ${{ steps.detect.outputs.max_parallel }}
+      has_orphans: ${{ steps.detect.outputs.has_orphans }}
     steps:
       - uses: actions/checkout@v6
 
@@ -86,6 +66,13 @@ jobs:
             --cache-dir .cache/hf-listings \
             $ENTITY_ARG
 
+          # Check if orphans were found
+          if python3 -c "import json; d=json.load(open('detect_results.json')); exit(0 if d.get('orphans') else 1)"; then
+            echo "has_orphans=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_orphans=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Save HF listing cache
         if: always()
         uses: actions/cache/save@v5
@@ -99,6 +86,36 @@ jobs:
           name: detect-results
           path: detect_results.json
           retention-days: 1
+
+  # ── Cleanup ──────────────────────────────────────────────────────
+  # Runs once. Deletes orphan files from HF that have no S3 manifest entry.
+  # S3 is the single source of truth; anything on HF not derivable from
+  # the current manifest is removed.
+
+  cleanup:
+    needs: detect
+    if: needs.detect.outputs.has_orphans == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - run: pip install -r sync/requirements.txt
+
+      - name: Download detect results
+        uses: actions/download-artifact@v8
+        with:
+          name: detect-results
+
+      - name: Cleanup orphan files
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python3 -m sync.ci_sync cleanup --detect-file detect_results.json
 
   # ── Sync (per-entity matrix) ─────────────────────────────────────────
   # Each matrix entry is one entity. The job handles ALL of that entity's
