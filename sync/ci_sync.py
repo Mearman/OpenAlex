@@ -960,7 +960,7 @@ def cleanup_orphans(
             batch = paths[i:i + BATCH]
             operations = [CommitOperationDelete(path_in_repo=p) for p in batch]
             try:
-                api.commit(
+                api.create_commit(
                     repo_id=HF_REPO_ID,
                     repo_type="dataset",
                     operations=operations,
