@@ -815,6 +815,7 @@ def cleanup_tmp_files(entity_filter: str | None = None) -> None:
     for files matching ``__tmp__*`` and deletes them in batches.
     """
     import httpx
+    from huggingface_hub import HfApi
 
     entities = ["works", "authors", "sources", "institutions", "publishers",
                 "funders", "concepts", "topics", "subfields", "fields",
