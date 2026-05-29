@@ -160,146 +160,29 @@ ENTITY_PREFIX_MAP: dict[str, str] = {
     "subfields": "Sf",
 }
 
-ENTITY_TYPE_IDS = {name: i for i, name in enumerate(ENTITY_TYPES)}
-
-# Build order: smallest entities first for faster incremental progress.
-ENTITY_TYPES_BUILD_ORDER = [
-    "domains",
-    "fields",
-    "subfields",
-    "topics",
-    "publishers",
-    "funders",
-    "awards",
-    "concepts",
-    "institutions",
-    "sources",
-    "authors",
-    "works",
-]
-
-# ── Edge mappings ────────────────────────────────────────────────────────
-
-EDGE_TYPE_MAPPING: dict[str, tuple[str, str]] = {
-    "work-authors":         ("works", "authors"),
-    "author-works":         ("authors", "works"),
-    "citations":            ("works", "works"),
-    "cited-by":             ("works", "works"),
-    "related-works":        ("works", "works"),
-    "work-institutions":    ("works", "institutions"),
-    "institution-works":    ("institutions", "works"),
-    "work-topics":          ("works", "topics"),
-    "topic-works":          ("topics", "works"),
-    "work-concepts":        ("works", "concepts"),
-    "concept-works":        ("concepts", "works"),
-    "work-sources":         ("works", "sources"),
-    "source-works":         ("sources", "works"),
-    "work-funders":         ("works", "funders"),
-    "funder-works":         ("funders", "works"),
-    "author-institutions":  ("authors", "institutions"),
-    "institution-authors":  ("institutions", "authors"),
-    "author-topics":        ("authors", "topics"),
-    "topic-authors":        ("topics", "authors"),
-    "institution-associated": ("institutions", "institutions"),
-    "institution-topics":   ("institutions", "topics"),
-    "source-publishers":    ("sources", "publishers"),
-    "publisher-sources":    ("publishers", "sources"),
-    "source-topics":        ("sources", "topics"),
-    "topic-subfields":      ("topics", "subfields"),
-    "subfield-topics":      ("subfields", "topics"),
-    "topic-fields":         ("topics", "fields"),
-    "field-topics":         ("fields", "topics"),
-    "topic-domains":        ("topics", "domains"),
-    "domain-topics":        ("domains", "topics"),
-    "subfield-fields":      ("subfields", "fields"),
-    "field-subfields":      ("fields", "subfields"),
-    "subfield-domains":     ("subfields", "domains"),
-    "domain-subfields":     ("domains", "subfields"),
-    "field-domains":        ("fields", "domains"),
-    "domain-fields":        ("domains", "fields"),
-    "publisher-parent":     ("publishers", "publishers"),
-}
-
-EDGE_TO_TABLE: dict[str, str | None] = {
-    "work-authors":             "work_authorships",
-    "author-works":             "work_authorships",
-    "citations":                "work_references",
-    "cited-by":                 "work_references",
-    "related-works":            "work_related",
-    "work-institutions":        "work_corresponding_institutions",
-    "institution-works":        "work_corresponding_institutions",
-    "work-topics":              "work_topics",
-    "topic-works":              "work_topics",
-    "work-concepts":            "work_concepts",
-    "concept-works":            "work_concepts",
-    "work-sources":             None,
-    "source-works":             None,
-    "work-funders":             "work_funders",
-    "funder-works":             "work_funders",
-    "author-institutions":      "author_institutions",
-    "institution-authors":      "author_institutions",
-    "author-topics":            "author_topics",
-    "topic-authors":            "author_topics",
-    "institution-associated":   "institution_associations",
-    "institution-topics":       "institution_topics",
-    "source-publishers":        "source_host_lineage",
-    "publisher-sources":        "source_host_lineage",
-    "source-topics":            "source_topics",
-    "topic-subfields":          "topic_subfields",
-    "subfield-topics":          "topic_subfields",
-    "topic-fields":             "topic_fields",
-    "field-topics":             "topic_fields",
-    "topic-domains":            "topic_domains",
-    "domain-topics":            "topic_domains",
-    "subfield-fields":          "subfield_fields",
-    "field-subfields":          "subfield_fields",
-    "subfield-domains":         "subfield_domains",
-    "domain-subfields":         "subfield_domains",
-    "field-domains":            "field_domains",
-    "domain-fields":            "field_domains",
-    "publisher-parent":         "publisher_lineage",
-}
-
-# ── Nested parquet path mapping ─────────────────────────────────────────
-
-# Singular entity name → plural directory name.
-# New entities added by OpenAlex (e.g. "awards") only need an entry here;
-# all relationship types are then auto-derived from the naming convention
-#   {singular}_{subtable} → {plural}/{subtable}
-#   {singular}-{subtable} → {plural}/{subtable}   (hyphenated variant)
-_ENTITY_SINGULAR_TO_PLURAL: dict[str, str] = {
-    "work": "works",
-    "author": "authors",
-    "institution": "institutions",
-    "source": "sources",
-    "concept": "concepts",
-    "topic": "topics",
-    "field": "fields",
-    "subfield": "subfields",
-    "domain": "domains",
-    "publisher": "publishers",
-    "funder": "funders",
-    "award": "awards",
-    "sdg": "sdgs",
-    "continent": "continents",
-    "country": "countries",
-}
-
-
 def nested_rt_path(rt: str) -> str:
     """Map a flat relationship type name to its nested entity/subtable path.
 
     Convention: ``{entity_singular}_{subtable}`` → ``{entity_plural}/{subtable}``.
+    The plural is derived by appending 's' to the singular prefix
+    (e.g. ``work_authorships`` → ``works/authorships``).
     Also handles hyphenated variants (``work-types`` → ``works/types``).
-    Returns the raw ``rt`` unchanged if no known entity prefix is found.
+    Returns the raw ``rt`` unchanged if no separator is found.
     """
-    # Try underscore separator first (most common), then hyphen.
     for sep in ("_", "-"):
         idx = rt.find(sep)
         if idx > 0:
-            prefix = rt[:idx]
-            if prefix in _ENTITY_SINGULAR_TO_PLURAL:
-                return f"{_ENTITY_SINGULAR_TO_PLURAL[prefix]}/{rt[idx + 1:]}"
+            singular = rt[:idx]
+            subtable = rt[idx + 1:]
+            # Derive plural: strip trailing 's' if present, then add 's'
+            # Handles irregular singulars like "sdg" → "sdgs"
+            if singular.endswith("ss"):
+                plural = singular + "es"
+            elif singular.endswith("s"):
+                plural = singular
+            else:
+                plural = singular + "s"
+            return f"{plural}/{subtable}"
     return rt
 
 
@@ -326,17 +209,16 @@ _skipped_missing_files: list[str] = []
 
 
 def extract_id(value: str | int | None) -> int | None:
-    """Strip OpenAlex URL to bare integer."""
+    """Strip an OpenAlex URL or identifier to its numeric suffix."""
     if value is None or value == "":
         return None
     if isinstance(value, int):
         return value
     part = value.rsplit("/", 1)[-1]
-    if part and part[0].isalpha():
-        part = part[1:]
-    if part.isdigit():
-        return int(part)
-    return None
+    match = re.search(r"(\d+)$", part)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def format_size(nbytes: float) -> str:

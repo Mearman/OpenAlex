@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import hashlib
+from functools import lru_cache
 import multiprocessing
 import shutil
 import subprocess
@@ -40,6 +41,7 @@ from sync.common import (
     format_size,
     _json_loads,
 )
+from sync.schema import EntitySchema, extract_relationships, get_entity_schema
 
 try:
     import orjson as _orjson
@@ -1365,14 +1367,7 @@ def _extract_one_source_file(
     Returns ``{rel_type → {"source_key": str, "row_count": int}}``.
     """
     source_key = _source_file_key(source_file)
-    try:
-        source_file_rel = str(source_file.relative_to(SNAPSHOT_DIR))
-    except ValueError:
-        source_file_rel = str(source_file)
-
-    content_length = source_file.stat().st_size if source_file.exists() else 0
-
-    _, extractor = _ENTITY_DISPATCH[entity_type]
+    schema = _entity_schema(entity_type)
 
     # Open one writer per relationship type for this source file
     writers: dict[str, _SourceFileWriter] = {}
@@ -1383,14 +1378,13 @@ def _extract_one_source_file(
         )
 
     buffers: dict[str, list[dict]] = {rt: [] for rt in rel_types}
-    record_count = 0
 
     # Cache globals for inner-loop performance
     _buffers = buffers
     _writers = writers
 
     for record in iter_jsonl(source_file):
-        rels = extractor(record)
+        rels = _extract_entity_relationships(record, schema)
         for rt, rows in rels.items():
             buf = _buffers.get(rt)
             if buf is None:
@@ -1399,7 +1393,6 @@ def _extract_one_source_file(
             if len(buf) >= batch_size:
                 _writers[rt].write_batch(buf)
                 _buffers[rt] = []
-        record_count += 1
 
     results: dict[str, dict] = {}
     for rt in rel_types:
@@ -1411,7 +1404,6 @@ def _extract_one_source_file(
         results[rt] = {"source_key": source_key, "row_count": row_count}
 
     return results
-
 
 def _hash_file(path: Path) -> str:
     """SHA-256 of file contents, truncated to 16 hex chars."""
@@ -1556,325 +1548,24 @@ def _worker_process_files(
     }
 
 
-# ── Relationship type sets per source entity ────────────────────────────
-_WORK_RELATIONSHIP_TYPES = frozenset({
-    "work_authorships",
-    "work_authorship_institutions",
-    "work_references",
-    "work_topics",
-    "work_concepts",
-    "work_locations",
-    "work_related",
-    "work_funders",
-    "work_keywords",
-    "work_sdgs",
-    "work_mesh",
-    "work_corresponding_authors",
-    "work_corresponding_institutions",
-    # Lossless projection (replaces _json column)
-    "work_counts_by_year",
-    "work_external_ids",
-    "work_indexed_in",
-    "work_awards",
-    "work_abstracts",
-})
-
-_AUTHOR_RELATIONSHIP_TYPES = frozenset({
-    "author_institutions",
-    "author_last_known_institutions",
-    "author_topics",
-    # Lossless projection (replaces _json column)
-    "author_counts_by_year",
-    "author_external_ids",
-    "author_name_alternatives",
-    "author_topic_share",
-    "author_sources",
-    "author_concepts",
-})
-
-_SOURCE_RELATIONSHIP_TYPES = frozenset({
-    "source_host_lineage",
-    "source_topics",
-    "source_societies",
-    # Lossless projection (replaces _json column)
-    "source_counts_by_year",
-    "source_external_ids",
-    "source_issns",
-    "source_apc_prices",
-    "source_alternate_titles",
-    "source_topic_share",
-})
-
-_INSTITUTION_RELATIONSHIP_TYPES = frozenset({
-    "institution_associations",
-    "institution_repositories",
-    "institution_roles",
-    "institution_lineage",
-    "institution_topics",
-    # Lossless projection (replaces _json column)
-    "institution_counts_by_year",
-    "institution_external_ids",
-    "institution_name_alternatives",
-    "institution_name_acronyms",
-    "institution_topic_share",
-})
-
-_PUBLISHER_RELATIONSHIP_TYPES = frozenset({
-    "publisher_lineage",
-    "publisher_roles",
-    "publisher_countries",
-    "publisher_counts_by_year",
-    "publisher_external_ids",
-    "publisher_alternate_titles",
-})
-
-_FUNDER_RELATIONSHIP_TYPES = frozenset({
-    "funder_roles",
-    "funder_counts_by_year",
-    "funder_external_ids",
-    "funder_alternate_titles",
-})
-
-_CONCEPT_RELATIONSHIP_TYPES = frozenset({
-    "concept_ancestors",
-    "concept_related",
-    "concept_counts_by_year",
-    "concept_external_ids",
-})
-
-_TOPIC_RELATIONSHIP_TYPES = frozenset({
-    "topic_subfields",
-    "topic_fields",
-    "topic_domains",
-    "topic_keywords",
-    "topic_external_ids",
-})
-
-_SUBFIELD_RELATIONSHIP_TYPES = frozenset({
-    "subfield_fields",
-    "subfield_domains",
-    "subfield_external_ids",
-    "subfield_name_alternatives",
-})
-
-_FIELD_RELATIONSHIP_TYPES = frozenset({
-    "field_domains",
-    "field_external_ids",
-    "field_name_alternatives",
-})
-
-_DOMAIN_RELATIONSHIP_TYPES = frozenset({
-    "domain_external_ids",
-    "domain_name_alternatives",
-})
-
-_SDG_RELATIONSHIP_TYPES = frozenset({
-    "sdg_external_ids",
-})
-
-_AWARD_RELATIONSHIP_TYPES = frozenset({
-    "award_investigators",
-    "award_investigator_affiliations",
-    "award_funded_outputs",
-})
-
-_CONTINENT_RELATIONSHIP_TYPES = frozenset({
-    "continent_countries",
-    "continent_external_ids",
-    "continent_name_alternatives",
-})
-
-_COUNTRY_RELATIONSHIP_TYPES = frozenset({
-    "country_external_ids",
-    "country_name_alternatives",
-})
-
-# Inferred (algorithmically derived) relationships — excluded by default.
-# These are aggregated by OpenAlex from underlying primary data, not
-# explicitly recorded as edges.
-INFERRED_RELATIONSHIP_TYPES = frozenset({
-    "work_topics",
-    "work_concepts",
-    "work_related",
-    "work_keywords",
-    "concept_related",
-    "author_topics",
-    "institution_topics",
-    "source_topics",
-})
-
-# Core structural graph edges: citation links, authorship edges, institutional
-# affiliations, funding links, locations.  These form the citation/collaboration
-# graph and are the foundation for downstream graph-analytic methods.
-# Everything NOT in this set and NOT inferred is an annotation/metadata table.
-_GRAPH_RELATIONSHIP_TYPES = frozenset({
-    # Works
-    "work_authorships",
-    "work_authorship_institutions",
-    "work_references",
-    "work_funders",
-    "work_locations",
-    "work_corresponding_institutions",
-    "work_corresponding_authors",
-    # Authors
-    "author_institutions",
-    "author_last_known_institutions",
-    "author_sources",
-    # Sources
-    "source_host_lineage",
-    # Institutions
-    "institution_repositories",
-    "institution_lineage",
-    "institution_associations",
-    # Publishers
-    "publisher_lineage",
-    # Concepts
-    "concept_ancestors",
-    "concept_related",
-    # Topics
-    "topic_subfields",
-    "topic_fields",
-    "topic_domains",
-    # Subfields / Fields / Domains
-    "subfield_fields",
-    "subfield_domains",
-    "field_domains",
-    # Awards
-    "award_investigators",
-    "award_investigator_affiliations",
-    "award_funded_outputs",
-    # Geography
-    "continent_countries",
-})
+# ── Relationship type helpers ───────────────────────────────────────────
 
 
-# Rough row-count estimates for ordering: smallest first so quick types
-# finish early and free disk space.  Exact values don't matter — only the
-# relative ordering within each category (structural / inferred) does.
-_SIZE_ESTIMATE: dict[str, int] = {
-    # ── Works graph edges (structural core) ─────────────────────────────
-    "work_corresponding_institutions": 1,
-    "work_corresponding_authors":      2,
-    "work_funders":                    3,
-    "work_locations":                  4,
-    "work_authorships":                5,
-    "work_authorship_institutions":    6,  # same order as work_authorships
-    "work_references":                 7,
-    # ── Works annotation/metadata (non-structural) ──────────────────────
-    "work_sdgs":                       8,
-    "work_mesh":                       9,
-    "work_awards":                    10,
-    "work_indexed_in":                11,
-    "work_counts_by_year":            12,
-    "work_external_ids":              13,
-    "work_abstracts":                 14,
-    # ── Works inferred ──────────────────────────────────────────────────
-    "work_keywords":                  15,
-    "work_related":                   16,
-    "work_concepts":                  17,
-    "work_topics":                    18,
-    # ── Authors ─────────────────────────────────────────────────────────
-    "author_name_alternatives":        1,
-    "author_external_ids":             2,
-    "author_institutions":            3,
-    "author_last_known_institutions": 4,
-    "author_counts_by_year":          5,
-    "author_sources":                 6,
-    "author_topic_share":             7,
-    "author_concepts":                8,
-    "author_topics":                  9,
-    # ── Sources ─────────────────────────────────────────────────────────
-    "source_societies":                1,
-    "source_issns":                    2,
-    "source_alternate_titles":         3,
-    "source_external_ids":             4,
-    "source_host_lineage":             5,
-    "source_counts_by_year":           6,
-    "source_topic_share":              7,
-    "source_topics":                   8,
-    # ── Institutions ────────────────────────────────────────────────────
-    "institution_name_acronyms":       1,
-    "institution_name_alternatives":   2,
-    "institution_external_ids":        3,
-    "institution_repositories":        4,
-    "institution_roles":               5,
-    "institution_associations":        6,
-    "institution_lineage":             7,
-    "institution_counts_by_year":      8,
-    "institution_topic_share":         9,
-    "institution_topics":             10,
-    # ── Other entities (small volumes, alphabetical is fine) ────────────
-    "publisher_alternate_titles":      1,
-    "publisher_external_ids":          2,
-    "publisher_countries":             3,
-    "publisher_roles":                 4,
-    "publisher_lineage":               5,
-    "publisher_counts_by_year":        6,
-    "funder_alternate_titles":         1,
-    "funder_external_ids":             2,
-    "funder_roles":                    3,
-    "funder_counts_by_year":           4,
-    "concept_ancestors":               1,
-    "concept_external_ids":            2,
-    "concept_counts_by_year":          3,
-    "concept_related":                 4,
-    "topic_keywords":                  1,
-    "topic_external_ids":              2,
-    "topic_subfields":                 3,
-    "topic_fields":                    4,
-    "topic_domains":                   5,
-    "subfield_name_alternatives":      1,
-    "subfield_external_ids":           2,
-    "subfield_fields":                 3,
-    "subfield_domains":                4,
-    "field_name_alternatives":         1,
-    "field_external_ids":              2,
-    "field_domains":                   3,
-    "domain_name_alternatives":        1,
-    "domain_external_ids":             2,
-    "sdg_external_ids":                1,
-    "award_investigators":             1,
-    "award_investigator_affiliations": 2,
-    "award_funded_outputs":            3,
-    "continent_name_alternatives":     1,
-    "continent_countries":             2,
-    "continent_external_ids":          3,
-    "country_name_alternatives":       1,
-    "country_external_ids":            2,
-}
+@lru_cache(maxsize=None)
+def _entity_schema(entity: str) -> EntitySchema:
+    return get_entity_schema(entity, source_dir=SNAPSHOT_DIR)
+
+
+def _extract_entity_relationships(record: dict, schema: EntitySchema) -> dict[str, list[dict]]:
+    return extract_relationships(record, schema)
+
+
+def _entity_rel_types(entity: str) -> frozenset[str]:
+    return _entity_schema(entity).rel_type_names()
 
 
 def _order_rel_types(rel_types: frozenset[str]) -> list[str]:
-    """Order: graph edges (smallest first), then annotations, then inferred."""
-    def sort_key(rt: str) -> tuple[int, int, int]:
-        if rt in _GRAPH_RELATIONSHIP_TYPES:
-            tier = 0
-        elif rt in INFERRED_RELATIONSHIP_TYPES:
-            tier = 2
-        else:
-            tier = 1  # annotation / metadata
-        return (tier, _SIZE_ESTIMATE.get(rt, 999), hash(rt))
-    return sorted(rel_types, key=sort_key)
-
-
-_ENTITY_DISPATCH: dict[str, tuple[frozenset[str], object]] = {
-    "works":        (_WORK_RELATIONSHIP_TYPES,        _extract_work_relationships),
-    "authors":      (_AUTHOR_RELATIONSHIP_TYPES,      _extract_author_relationships),
-    "sources":      (_SOURCE_RELATIONSHIP_TYPES,      _extract_source_relationships),
-    "institutions": (_INSTITUTION_RELATIONSHIP_TYPES, _extract_institution_relationships),
-    "publishers":   (_PUBLISHER_RELATIONSHIP_TYPES,   _extract_publisher_relationships),
-    "funders":      (_FUNDER_RELATIONSHIP_TYPES,      _extract_funder_relationships),
-    "concepts":     (_CONCEPT_RELATIONSHIP_TYPES,     _extract_concept_relationships),
-    "topics":       (_TOPIC_RELATIONSHIP_TYPES,       _extract_topic_relationships),
-    "subfields":    (_SUBFIELD_RELATIONSHIP_TYPES,    _extract_subfield_relationships),
-    "fields":       (_FIELD_RELATIONSHIP_TYPES,       _extract_field_relationships),
-    "domains":      (_DOMAIN_RELATIONSHIP_TYPES,      _extract_domain_relationships),
-    "sdgs":         (_SDG_RELATIONSHIP_TYPES,         _extract_sdg_relationships),
-    "awards":       (_AWARD_RELATIONSHIP_TYPES,       _extract_award_relationships),
-    "continents":   (_CONTINENT_RELATIONSHIP_TYPES,   _extract_continent_relationships),
-    "countries":    (_COUNTRY_RELATIONSHIP_TYPES,     _extract_country_relationships),
-}
-
+    return sorted(rel_types)
 
 # ── Main conversion ────────────────────────────────────────────────────
 
@@ -1924,16 +1615,10 @@ def convert_relationships(
     """
     _output_dir = output_dir if output_dir is not None else SNAPSHOT_DIR
 
-    if entity_type not in _ENTITY_DISPATCH:
-        log.info("%s: no relationship extraction defined, skipping", entity_type)
-        return {}
-
-    all_rel_types, _ = _ENTITY_DISPATCH[entity_type]
+    all_rel_types = _entity_rel_types(entity_type)
 
     # Apply exclusions
     effective_exclude = frozenset(exclude or ())
-    if not include_inferred:
-        effective_exclude = effective_exclude | INFERRED_RELATIONSHIP_TYPES
     if effective_exclude:
         skipped = all_rel_types & effective_exclude
         if skipped:
@@ -2096,9 +1781,8 @@ def convert_relationships(
             continue
 
         log.info(
-            "%s: %s [%s] — %d files to process (%d already done)",
+            "%s: %s — %d files to process (%d already done)",
             entity_type, rt,
-            "inferred" if rt in INFERRED_RELATIONSHIP_TYPES else "structural",
             len(pending), len(completed),
         )
         all_pending_types.append(rt)
@@ -2307,7 +1991,7 @@ def migrate_relationship_type(
         return {"migrated": 0, "re_extracted": 0, "validated": 0, "total_source_files": 0}
 
     effective_batch_size = batch_size or _BATCH_SIZE
-    all_rel_types, extractor = _ENTITY_DISPATCH[entity_type]
+    all_rel_types = _entity_rel_types(entity_type)
     if relationship_type not in all_rel_types:
         log.error("%s is not a valid relationship type for %s", relationship_type, entity_type)
         return {"migrated": 0, "re_extracted": 0, "validated": 0, "total_source_files": len(source_files)}
@@ -2491,11 +2175,13 @@ def main(entity: str | None = None, force: bool = False, workers: int | None = N
         # Also update this module's reference
         global SNAPSHOT_DIR
         SNAPSHOT_DIR = _common.SNAPSHOT_DIR
+        _entity_schema.cache_clear()
 
     if sync_provenance:
         _sync_provenance_from_remote(sync_provenance)
 
-    types = [entity] if entity else _common.ENTITY_TYPES_BUILD_ORDER
+    from sync.schema import _discover_entities
+    types = [entity] if entity else _discover_entities(SNAPSHOT_DIR)
     for et in types:
         counts = convert_relationships(et, force=force, workers=workers, batch_size=batch_size, slice_index=slice_index, slice_total=slice_total)
         for rt, cnt in sorted(counts.items()):

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Verify schema-driven extraction produces identical output to hardcoded functions.
+"""Smoke-test schema-driven extraction against representative sample records.
 
-For each entity, loads a sample record, runs both extractors, and diffs the results.
-Reports any mismatches in column names, row counts, or data values.
+For each entity, loads a sample record, infers a schema, and runs the generic
+extractor to make sure the discovered relationship types line up with the rows
+produced from that record.
 """
 from __future__ import annotations
 
@@ -13,23 +14,7 @@ from pathlib import Path
 # Add sync/ to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from sync.extract import (
-    _ENTITY_DISPATCH,
-    _extract_work_relationships,
-    _extract_author_relationships,
-    _extract_source_relationships,
-    _extract_institution_relationships,
-    _extract_publisher_relationships,
-    _extract_funder_relationships,
-    _extract_concept_relationships,
-    _extract_topic_relationships,
-    _extract_subfield_relationships,
-    _extract_field_relationships,
-    _extract_domain_relationships,
-    _extract_sdg_relationships,
-    _extract_award_relationships,
-)
-from sync.schema import probe_schema, extract_relationships
+from sync.schema import extract_relationships, probe_schema
 
 
 def normalise(result: dict[str, list[dict]]) -> dict[str, list[dict]]:
@@ -42,61 +27,29 @@ def normalise(result: dict[str, list[dict]]) -> dict[str, list[dict]]:
 
 
 def compare(entity: str, record: dict) -> bool:
-    """Compare hardcoded vs schema extraction for one record. Returns True if match."""
-    _, hardcoded_fn = _ENTITY_DISPATCH.get(entity, (frozenset(), None))
-    if hardcoded_fn is None:
-        print(f"  SKIP: no hardcoded extractor for {entity}")
-        return True
-
-    hardcoded = normalise(hardcoded_fn(record))
+    """Smoke-test schema-driven extraction for one record."""
     schema = probe_schema(entity, record)
     generic = normalise(extract_relationships(record, schema))
 
-    # Check rel type coverage
-    hc_types = set(hardcoded.keys())
-    gen_types = set(generic.keys())
+    discovered = schema.rel_type_names()
+    produced = set(generic.keys())
 
     ok = True
-    missing = hc_types - gen_types
-    extra = gen_types - hc_types
+    missing = discovered - produced
+    extra = produced - discovered
 
     if missing:
-        print(f"  MISSING rel types (schema doesn't produce): {sorted(missing)}")
+        print(f"  MISSING rel types: {sorted(missing)}")
         ok = False
     if extra:
-        print(f"  EXTRA rel types (schema produces but hardcoded doesn't): {sorted(extra)}")
+        print(f"  EXTRA rel types: {sorted(extra)}")
         ok = False
 
-    # Compare shared rel types
-    for rt in sorted(hc_types & gen_types):
-        hc_rows = hardcoded[rt]
-        gen_rows = generic[rt]
+    for rt in sorted(produced):
+        print(f"  {rt}: {len(generic[rt])} rows")
 
-        if len(hc_rows) != len(gen_rows):
-            print(f"  {rt}: row count mismatch: hardcoded={len(hc_rows)}, schema={len(gen_rows)}")
-            ok = False
-            continue
-
-        if hc_rows != gen_rows:
-            print(f"  {rt}: row content mismatch")
-            for i, (h, g) in enumerate(zip(hc_rows, gen_rows)):
-                if h != g:
-                    # Show diff
-                    h_keys = set(h.keys())
-                    g_keys = set(g.keys())
-                    if h_keys != g_keys:
-                        print(f"    row {i}: key diff: hardcoded={sorted(h_keys)}, schema={sorted(g_keys)}")
-                    else:
-                        diffs = {k: (h.get(k), g.get(k)) for k in h_keys if h.get(k) != g.get(k)}
-                        print(f"    row {i}: value diff: {diffs}")
-            ok = False
-
-    if ok:
-        print(f"  OK: {len(hc_types)} rel types, all match")
-
-    # Report schema discovery
-    print(f"  Schema discovered: {len(schema.fields)} fields, {len(schema.rel_type_names())} rel types")
-    print(f"  Rel types: {sorted(schema.rel_type_names())}")
+    print(f"  Schema discovered: {len(schema.fields)} fields, {len(discovered)} rel types")
+    print(f"  Rel types: {sorted(discovered)}")
 
     return ok
 

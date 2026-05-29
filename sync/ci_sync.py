@@ -28,8 +28,6 @@ import boto3
 from botocore import UNSIGNED
 from botocore.config import Config
 
-from sync.common import ENTITY_TYPES_BUILD_ORDER
-
 S3_BUCKET = "openalex"
 HF_REPO_ID = "Mearman/OpenAlex"
 
@@ -48,37 +46,15 @@ log = logging.getLogger("openalex-sync")
 
 
 # ── Entity relationship types ────────────────────────────────────────────
-# Mirror of extract.py _ENTITY_DISPATCH relationship type counts.
 # Used for matrix generation — relationship splitting is only applied to
 # entities with multiple relationship types.
 
-# Derived from extract.py frozensets — single source of truth.
-# Do not edit manually; the frozensets in extract.py are canonical.
+
 def _build_entity_rel_counts() -> dict[str, int]:
-    from sync.extract import (
-        _WORK_RELATIONSHIP_TYPES, _AUTHOR_RELATIONSHIP_TYPES,
-        _SOURCE_RELATIONSHIP_TYPES, _INSTITUTION_RELATIONSHIP_TYPES,
-        _PUBLISHER_RELATIONSHIP_TYPES, _FUNDER_RELATIONSHIP_TYPES,
-        _CONCEPT_RELATIONSHIP_TYPES, _TOPIC_RELATIONSHIP_TYPES,
-        _SUBFIELD_RELATIONSHIP_TYPES, _FIELD_RELATIONSHIP_TYPES,
-        _DOMAIN_RELATIONSHIP_TYPES, _SDG_RELATIONSHIP_TYPES,
-        _AWARD_RELATIONSHIP_TYPES,
-    )
-    return {
-        "works": len(_WORK_RELATIONSHIP_TYPES),
-        "authors": len(_AUTHOR_RELATIONSHIP_TYPES),
-        "sources": len(_SOURCE_RELATIONSHIP_TYPES),
-        "institutions": len(_INSTITUTION_RELATIONSHIP_TYPES),
-        "publishers": len(_PUBLISHER_RELATIONSHIP_TYPES),
-        "funders": len(_FUNDER_RELATIONSHIP_TYPES),
-        "concepts": len(_CONCEPT_RELATIONSHIP_TYPES),
-        "topics": len(_TOPIC_RELATIONSHIP_TYPES),
-        "subfields": len(_SUBFIELD_RELATIONSHIP_TYPES),
-        "fields": len(_FIELD_RELATIONSHIP_TYPES),
-        "domains": len(_DOMAIN_RELATIONSHIP_TYPES),
-        "sdgs": len(_SDG_RELATIONSHIP_TYPES),
-        "awards": len(_AWARD_RELATIONSHIP_TYPES),
-    }
+    from sync.schema import all_entity_rel_types
+    rel_types = all_entity_rel_types()
+    return {entity: len(rts) for entity, rts in rel_types.items()}
+
 
 _ENTITY_REL_COUNTS: dict[str, int] = _build_entity_rel_counts()
 
@@ -150,11 +126,8 @@ def _size_aware_batch(
 
 def _entity_rel_types(entity: str) -> frozenset[str]:
     """Return all relationship type names for an entity."""
-    from sync.extract import _ENTITY_DISPATCH
-    if entity not in _ENTITY_DISPATCH:
-        return frozenset()
-    rel_types, _ = _ENTITY_DISPATCH[entity]
-    return rel_types
+    from sync.schema import entity_rel_types
+    return entity_rel_types(entity)
 
 
 def _entity_rel_subdirs(entity: str) -> list[str] | None:
@@ -416,8 +389,9 @@ def detect_new_shards(
     from huggingface_hub import HfApi
     api = HfApi()
 
+    from sync.schema import _discover_entities
     entities = (
-        [entity_filter] if entity_filter else ENTITY_TYPES_BUILD_ORDER
+        [entity_filter] if entity_filter else _discover_entities(SNAPSHOT_DIR)
     )
     new_shards: dict[str, list[str]] = {}
     shard_sizes: dict[str, int] = {}
@@ -615,14 +589,15 @@ def sync_shards(
 
     # Flatten to ordered list of (entity, s3_key) pairs
     queue: list[tuple[str, str]] = []
+    from sync.schema import _discover_entities
+    all_entities = _discover_entities(SNAPSHOT_DIR)
     if batch_keys:
-        # Use pre-computed batch assignments from detect results
-        for entity in ENTITY_TYPES_BUILD_ORDER:
+        for entity in all_entities:
             if entity in batch_keys:
                 for s3_key in batch_keys[entity]:
                     queue.append((entity, s3_key))
     else:
-        for entity in ENTITY_TYPES_BUILD_ORDER:
+        for entity in all_entities:
             if entity in new_shards:
                 for s3_key in new_shards[entity]:
                     queue.append((entity, s3_key))
