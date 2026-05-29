@@ -53,8 +53,6 @@ jobs:
         with:
           path: .cache/hf-listings
           key: hf-listings-${{ github.event.inputs.entity || 'all' }}-${{ github.run_id }}
-          restore-keys: |
-            hf-listings-${{ github.event.inputs.entity || 'all' }}-
 
       - name: Detect new shards
         id: detect
