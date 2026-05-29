@@ -353,7 +353,7 @@ def iter_source_files(entity_type: str) -> list[Path]:
     if not entity_dir.is_dir():
         log.warning("Source directory not found: %s", entity_dir)
         return []
-    return sorted(f for f in entity_dir.rglob("*.jsonl.gz") if not f.name.startswith("._"))
+    return sorted(f for f in entity_dir.rglob("*.jsonl.gz") if not f.name.startswith("."))
 
 
 def _entity_from_path(path: Path) -> str | None:

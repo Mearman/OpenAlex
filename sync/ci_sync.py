@@ -357,54 +357,42 @@ def _extract_shard(
 ) -> list[Path]:
     """Extract relationship parquets from a single source shard.
 
-    Creates a minimal mock snapshot (temp symlink for
-    convert_relationships to find the source file). Parquets are
-    written directly to output_dir via the output_dir parameter —
-    no post-extraction moves needed.
+    Sets SNAPSHOT_DIR to output_dir (where the source file already
+    lives at the correct path) so convert_relationships can find it.
+    No mock snapshot, no temp directory, no symlinks.
 
     When *rel_types* is given, only those types are extracted; all
-    others are excluded. This bounds disk usage to one source file +
-    one parquet at a time.
+    others are excluded.
 
     Returns list of parquet file paths written (inside output_dir).
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        mock_data = tmp_dir / "data" / entity
-        mock_data.mkdir(parents=True)
+    import sync.common as common
+    from sync.extract import convert_relationships
+    original_snapshot = common.SNAPSHOT_DIR
+    common.SNAPSHOT_DIR = output_dir
 
-        partition_dir = mock_data / source_path.parent.name
-        partition_dir.mkdir(exist_ok=True)
-        target = partition_dir / source_path.name
-        target.symlink_to(source_path.resolve())
+    # Build exclusion set: all entity rel types minus requested ones
+    exclude: frozenset[str] | None = None
+    all_types = _entity_rel_types(entity)
+    if rel_types is not None and rel_types != all_types:
+        exclude = all_types - rel_types
 
-        import sync.common as common
-        from sync.extract import convert_relationships
-        original_snapshot = common.SNAPSHOT_DIR
-        common.SNAPSHOT_DIR = tmp_dir / "data"
+    try:
+        convert_relationships(
+            entity, force=True, workers=1,
+            exclude=exclude, output_dir=output_dir,
+        )
+    finally:
+        common.SNAPSHOT_DIR = original_snapshot
 
-        # Build exclusion set: all entity rel types minus requested ones
-        exclude: frozenset[str] | None = None
-        all_types = _entity_rel_types(entity)
-        if rel_types is not None and rel_types != all_types:
-            exclude = all_types - rel_types
+    # Collect parquets written to output_dir
+    result = []
+    entity_out = output_dir / entity
+    if entity_out.exists():
+        for pq in entity_out.rglob("*.parquet"):
+            result.append(pq)
 
-        try:
-            convert_relationships(
-                entity, force=True, workers=1,
-                exclude=exclude, output_dir=output_dir,
-            )
-        finally:
-            common.SNAPSHOT_DIR = original_snapshot
-
-        # Collect parquets written to output_dir
-        result = []
-        entity_out = output_dir / entity
-        if entity_out.exists():
-            for pq in entity_out.rglob("*.parquet"):
-                result.append(pq)
-
-        return result
+    return result
 
 
 
