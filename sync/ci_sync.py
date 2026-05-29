@@ -405,9 +405,25 @@ def detect_new_shards(
     """
     api = HfApi()
 
-    entities = (
-        [entity_filter] if entity_filter else _discover_entities(SNAPSHOT_DIR)
-    )
+    # Entity discovery: prefer local snapshot, fall back to HF + S3 listing.
+    # On CI there is no local snapshot, so entities come from the union of
+    # HF top-level directories and S3 manifest prefixes.
+    local_entities = _discover_entities(SNAPSHOT_DIR) if SNAPSHOT_DIR.exists() else []
+    if local_entities:
+        entities = [entity_filter] if entity_filter else local_entities
+    else:
+        # CI path: discover entities from HF dataset tree
+        try:
+            hf_top = list(api.list_repo_tree(
+                repo_id=HF_REPO_ID, repo_type="dataset",
+                path_in_repo="data", recursive=False,
+            ))
+            entities = [item.path.split("/")[-1] for item in hf_top
+                        if item.path.startswith("data/")]
+        except Exception:
+            entities = []
+        if entity_filter:
+            entities = [entity_filter] if entity_filter in entities else []
     new_shards: dict[str, list[str]] = {}
     shard_sizes: dict[str, int] = {}
     orphans: dict[str, list[str]] = {}
@@ -627,8 +643,22 @@ def sync_shards(
         return
 
     # Flatten to ordered list of (entity, s3_key) pairs
+    # On CI there is no local snapshot — derive entity order from
+    # batch_keys or new_shards rather than _discover_entities.
+    local_entities = _discover_entities(SNAPSHOT_DIR) if SNAPSHOT_DIR.exists() else []
+    if local_entities:
+        all_entities = local_entities
+    elif batch_keys:
+        all_entities = list(dict.fromkeys(
+            k.split("/")[1]
+            for batch_list in batch_keys.values()
+            for k in batch_list
+            if "/" in k
+        ))
+    else:
+        all_entities = list(new_shards.keys())
+
     queue: list[tuple[str, str]] = []
-    all_entities = _discover_entities(SNAPSHOT_DIR)
     if batch_keys:
         for entity in all_entities:
             if entity in batch_keys:
