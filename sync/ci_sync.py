@@ -803,6 +803,72 @@ def sync_shards(
     if failed > 0:
         sys.exit(1)
 
+# ── Cleanup ────────────────────────────────────────────────────────────
+
+
+def cleanup_tmp_files(entity_filter: str | None = None) -> None:
+    """Delete __tmp__ prefixed parquet files from HuggingFace.
+
+    These files were created by a bug where mock snapshot temp directory paths
+    leaked into parquet shard keys. Scans each entity/rel_type directory on HF
+    for files matching ``__tmp__*`` and deletes them in batches.
+    """
+    import requests
+
+    entities = ["works", "authors", "sources", "institutions", "publishers",
+                "funders", "concepts", "topics", "subfields", "fields",
+                "domains", "sdgs", "awards"]
+    if entity_filter:
+        entities = [e for e in entities if e == entity_filter]
+
+    api = HfApi()
+    base_url = "https://huggingface.co/api/datasets/Mearman/OpenAlex/tree/main"
+    all_tmp: list[str] = []
+
+    for entity in entities:
+        # List subdirectories (relationship types) under this entity
+        resp = requests.get(base_url, params={"path": f"data/{entity}"}, timeout=30)
+        if resp.status_code != 200:
+            print(f"  {entity}: HTTP {resp.status_code}, skipping")
+            continue
+        dirs = [e["path"] for e in resp.json() if e.get("type") == "directory"]
+
+        for d in dirs:
+            resp2 = requests.get(base_url, params={"path": d}, timeout=30)
+            if resp2.status_code != 200:
+                continue
+            tmp_in_dir = [e["path"] for e in resp2.json()
+                           if "__tmp__" in e.get("path", "")]
+            if tmp_in_dir:
+                all_tmp.extend(tmp_in_dir)
+                print(f"  {d}: {len(tmp_in_dir)} __tmp__ files")
+            time.sleep(0.5)
+
+        print(f"  {entity}: done")
+
+    if not all_tmp:
+        print("No __tmp__ files found")
+        return
+
+    print(f"\nFound {len(all_tmp)} __tmp__ files, deleting...")
+
+    # Delete in batches of 500 (HF API limit per commit)
+    BATCH = 500
+    for i in range(0, len(all_tmp), BATCH):
+        batch = all_tmp[i:i + BATCH]
+        try:
+            api.delete_files(
+                repo_id=HF_REPO_ID,
+                repo_type="dataset",
+                paths=batch,
+                commit_message=f"chore: remove {len(batch)} __tmp__ parquet files",
+            )
+            print(f"  Deleted batch {i // BATCH + 1} ({len(batch)} files)")
+        except Exception as exc:
+            print(f"  Delete FAILED batch {i // BATCH + 1}: {exc}")
+
+    print(f"Cleanup complete: {len(all_tmp)} files deleted")
+
 
 # ── CLI ──────────────────────────────────────────────────────────────────
 
@@ -912,6 +978,9 @@ def _run_cli(args: argparse.Namespace) -> None:
         _emit_matrix(matrix)
         print(f"Matrix: {len(matrix)} entries")
 
+    elif args.command == "cleanup":
+        cleanup_tmp_files(entity_filter=args.entity)
+
     elif args.command == "sync":
         loaded: dict[str, list[str]] | None = None
         if args.detect_file:
@@ -960,5 +1029,8 @@ if __name__ == "__main__":
         "--detect-file", type=str, default=None,
         help="Load detect results from this file instead of re-running detect",
     )
+
+    cleanup_parser = sub.add_parser("cleanup", help="Delete __tmp__ parquet files from HF")
+    cleanup_parser.add_argument("--entity", type=str, default=None)
 
     _run_cli(parser.parse_args())
