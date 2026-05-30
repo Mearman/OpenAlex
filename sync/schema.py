@@ -19,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from sync.common import extract_id
+from sync.common import extract_id, iter_jsonl
 
 log = logging.getLogger(__name__)
 
@@ -1324,8 +1324,8 @@ def _schema_from_source_dir(
     seed_schema: EntitySchema | None = None,
 ) -> EntitySchema:
     files = sorted(
-        file for file in source_dir.glob("**/*.jsonl.gz")
-        if not file.name.startswith("._")
+        file for file in source_dir.glob("**/*.gz")
+        if not file.name.startswith("._") and (file.name.endswith(".jsonl.gz") or file.suffix == ".gz")
     )
     if not files:
         raise FileNotFoundError(f"No source files found for {entity} in {source_dir}")
@@ -1407,7 +1407,7 @@ def _discover_entities(source_dir: Path) -> list[str]:
     entities = []
     for child in sorted(source_dir.iterdir()):
         if child.is_dir() and not child.name.startswith((".", "_")):
-            if any(child.rglob("*.jsonl.gz")):
+            if any(child.rglob("*.gz")):
                 entities.append(child.name)
     return entities
 
