@@ -64,6 +64,12 @@
           "json_key": "x_concepts",
           "pattern": "id_ref",
           "rel_name": "author_x_concepts"
+        },
+        {
+          "id_path": "id",
+          "json_key": "sources",
+          "pattern": "id_ref",
+          "rel_name": "author_sources"
         }
       ],
       "id_col": "author_id",
