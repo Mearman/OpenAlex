@@ -711,10 +711,12 @@ def sync_shards(
     # Batch uploads to reduce HF API calls. Per-shard uploads caused
     # 429 rate limits when 20 parallel jobs each hit the API per shard.
     # Disk guard triggers early upload when free space is low.
-    # Higher UPLOAD_EVERY = fewer API calls = fewer 429s. 10 is safe on
-    # GitHub runners (14GB disk) even for works (18 rel types × 10 shards
-    # ≈ 180 parquets + 10 source files ≈ 3–4GB peak).
-    UPLOAD_EVERY = int(os.environ.get("UPLOAD_EVERY", "10"))
+    # Upload frequency: fewer API calls = fewer 429s, but works has 18 rel
+    # types producing large parquets that exhaust GitHub runner disk (14GB).
+    # Scale inversely with rel type count to keep peak disk bounded.
+    rel_count = len(rel_type_list) if rel_type_list else 1
+    default_upload_every = max(1, 50 // rel_count)  # works: 2, authors: 5, awards: 16
+    UPLOAD_EVERY = int(os.environ.get("UPLOAD_EVERY", str(default_upload_every)))
     DISK_GUARD_MB = 2048  # 2 GB minimum free space
 
     results: list[SyncResult] = []
@@ -830,7 +832,9 @@ def sync_shards(
                 shutil.move(str(jsonl_gz), str(src_upload))
 
                 # Per-rel-type extraction: extract one type at a time,
-                # upload each, then clean. Bounds disk to ~1 source + 1 parquet.
+                # accumulating in upload_dir. Upload is triggered per-shard
+                # (UPLOAD_EVERY=1 for works) or when disk is low, so parquets
+                # from previous rel types are cleaned regularly.
                 total_parquets = 0
                 for rt in rel_type_list:
                     rt_singleton = frozenset({rt})
@@ -839,6 +843,11 @@ def sync_shards(
                         rel_types=rt_singleton,
                     )
                     total_parquets += len(pq_files)
+
+                    # Upload and clean after each rel type for large entities
+                    # to prevent disk exhaustion on GitHub runners (14GB).
+                    if _disk_free_mb() < DISK_GUARD_MB and succeeded >= uploaded_count:
+                        _upload_and_clean(f"disk guard at {rt} shard {processed}/{total}")
 
                 elapsed = time.monotonic() - t0
                 n_files = 1 + total_parquets
