@@ -132,7 +132,25 @@ def _size_aware_batch(
 def _entity_rel_types(entity: str) -> frozenset[str]:
     """Return all relationship type names for an entity."""
     from sync.schema import entity_rel_types
-    return entity_rel_types(entity)
+    try:
+        return entity_rel_types(entity)
+    except RuntimeError:
+        return frozenset()
+
+
+def _probe_and_store_schema(entity: str, jsonl_path: Path) -> frozenset[str]:
+    """Probe schema from a downloaded JSONL file and persist it.
+
+    Called by sync_shards when no committed schema exists for an entity.
+    Probes from the actual JSONL data, writes the result to the committed
+    schema file, and returns the discovered rel types.
+    """
+    from sync.schema import _store_entity_schema, probe_schema_from_file
+    schema = probe_schema_from_file(entity, jsonl_path)
+    if schema is None:
+        return frozenset()
+    _store_entity_schema(entity, schema)
+    return schema.rel_type_names()
 
 
 def _entity_rel_subdirs(entity: str) -> list[str] | None:
@@ -700,8 +718,16 @@ def sync_shards(
     total = len(queue)
     entity_name = queue[0][0] if queue else "unknown"
     all_rel_types = _entity_rel_types(entity_name)
+
+    # If no committed schema for this entity, defer probing until
+    # the first shard is downloaded. The probe result is written
+    # back to openalex.schema.json so subsequent jobs use it.
+    schema_probed = len(all_rel_types) > 0
     rel_type_list = sorted(all_rel_types)
-    print(f"Syncing {total} shards ({entity_name}, {len(rel_type_list)} rel types)")
+    if schema_probed:
+        print(f"Syncing {total} shards ({entity_name}, {len(rel_type_list)} rel types)")
+    else:
+        print(f"Syncing {total} shards ({entity_name}, schema pending first shard)")
 
     # Staging directory for downloaded files before they enter upload dir
     staging_root = Path(tempfile.mkdtemp(prefix="openalex-sync-"))
@@ -733,6 +759,18 @@ def sync_shards(
     first_entity, first_key = queue[0]
     first_dest = staging_root / Path(first_key).name
     _download_shard(first_key, first_dest)
+
+    # If no committed schema existed, probe from the downloaded shard
+    if not schema_probed:
+        print(f"No committed schema for {entity_name}, probing from downloaded shard...")
+        discovered = _probe_and_store_schema(entity_name, first_dest)
+        if discovered:
+            all_rel_types = discovered
+            rel_type_list = sorted(discovered)
+            schema_probed = True
+            print(f"Discovered {len(discovered)} rel types for {entity_name}: {sorted(discovered)}")
+        else:
+            print(f"WARNING: Schema probe failed for {entity_name}, no extraction will occur")
 
     # Use a thread pool for overlapping download of next shard
     from concurrent.futures import Future
