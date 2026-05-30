@@ -521,20 +521,36 @@ class _SourceFileWriter:
         self._shard_name = f"{source_key}.parquet"
         self._current_path: Path | None = None
 
-    def _infer_schema(self, rows: list[dict]) -> pa.Schema:
-        """Infer PyArrow schema from the first batch of rows."""
-        table = pa.Table.from_pylist(rows)
-        # Promote integer columns that could be IDs to int64
-        fields = []
-        for i in range(len(table.schema)):
-            f = table.schema.field(i)
-            if f.type == pa.int32() or f.type == pa.int16() or f.type == pa.uint8():
-                fields.append(pa.field(f.name, pa.int64(), nullable=f.nullable))
-            elif f.type == pa.float32():
-                fields.append(pa.field(f.name, pa.float64(), nullable=f.nullable))
-            else:
-                fields.append(f)
-        return pa.schema(fields)
+    def _rows_to_table(self, rows: list[dict]) -> pa.Table:
+        """Convert rows to an Arrow table, inferring and caching schema on first call.
+
+        First call: infers schema via from_pylist, promotes narrow int/float
+        types to int64/float64, caches schema, and reuses the already-built
+        table via cast() — avoiding a second conversion.
+
+        Subsequent calls: uses columnar construction (from_pydict) which is
+        faster than from_pylist for large batches because PyArrow builds each
+        column from a homogeneous Python list using a C-level loop, avoiding
+        per-row dict key resolution.
+        """
+        if self.schema is None:
+            raw = pa.Table.from_pylist(rows)
+            fields = []
+            for f in raw.schema:
+                if f.type in (pa.int32(), pa.int16(), pa.uint8()):
+                    fields.append(pa.field(f.name, pa.int64(), nullable=f.nullable))
+                elif f.type == pa.float32():
+                    fields.append(pa.field(f.name, pa.float64(), nullable=f.nullable))
+                else:
+                    fields.append(f)
+            self.schema = pa.schema(fields)
+            return raw.cast(self.schema)
+
+        # Known schema — build column-at-a-time for better throughput
+        return pa.Table.from_pydict(
+            {name: [row.get(name) for row in rows] for name in self.schema.names},
+            schema=self.schema,
+        )
 
     def _ensure_writer(self) -> pq.ParquetWriter:
         assert self.schema is not None, f"Schema not yet inferred for {self.rel_type}"
@@ -549,10 +565,7 @@ class _SourceFileWriter:
     def write_batch(self, rows: list[dict]) -> None:
         if not rows:
             return
-        # Infer schema from first batch if not yet known
-        if self.schema is None:
-            self.schema = self._infer_schema(rows)
-        table = pa.Table.from_pylist(rows, schema=self.schema)
+        table = self._rows_to_table(rows)
         writer = self._ensure_writer()
         writer.write_table(table)
         self.total_count += len(rows)
