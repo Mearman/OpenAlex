@@ -810,6 +810,11 @@ def extract_relationships(
                 continue
             extracted = handler(*handler_args, **kwargs)
         else:
+            # List-expecting patterns: skip if value isn't a list
+            # (records occasionally contain malformed scalar values where
+            # an array is expected — e.g. a stray float in referenced_works).
+            if not isinstance(value, list):
+                continue
             extracted = handler(*handler_args, **kwargs)
 
         for rel_name, rows in extracted.items():
