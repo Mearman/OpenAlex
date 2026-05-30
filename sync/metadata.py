@@ -24,9 +24,8 @@ import pyarrow.parquet as pq
 
 from sync.common import (
     DATA_DIR,
-    ENTITY_TYPES_BUILD_ORDER,
+    ENTITY_TYPES,
     SNAPSHOT_DIR,
-    _ENTITY_SINGULAR_TO_PLURAL,
 )
 
 log = logging.getLogger(__name__)
@@ -212,7 +211,7 @@ def all_entities_info() -> dict[str, list[dict]]:
     Returns ``{entity_name: [sub_table_info, ...]}``.
     """
     result = {}
-    for entity in ENTITY_TYPES_BUILD_ORDER:
+    for entity in ENTITY_TYPES:
         info = entity_parquet_info(entity)
         if info:
             result[entity] = info
@@ -456,9 +455,8 @@ def _update_readme_entities(entities: dict[str, list[dict]]) -> None:
     """
     # Gather all entity info — use provided entities plus whatever's
     # already on disk for non-targeted entities.
-    from sync.common import ENTITY_TYPES_BUILD_ORDER
     full_entities: dict[str, list[dict]] = {}
-    for entity in ENTITY_TYPES_BUILD_ORDER:
+    for entity in ENTITY_TYPES:
         if entity in entities:
             full_entities[entity] = entities[entity]
         else:
