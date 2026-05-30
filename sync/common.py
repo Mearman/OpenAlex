@@ -84,6 +84,12 @@ class _Paths:
 _paths = _Paths()
 
 
+# Eagerly resolve lazy paths into module namespace so internal function
+# references (bare SNAPSHOT_DIR) work without __getattr__.
+SNAPSHOT_DIR: Path = _paths.SNAPSHOT_DIR
+SYNC_ROOT: Path = _paths.SYNC_ROOT
+
+
 def __getattr__(name):
     """Expose _Paths attributes at module level for backward compatibility."""
     if name in ("SYNC_ROOT", "DATA_DIR", "SNAPSHOT_DIR"):
@@ -95,6 +101,7 @@ def __setattr__(name, value):
     """Allow ``common.SNAPSHOT_DIR = ...`` to override lazy resolution."""
     if name in ("SYNC_ROOT", "SNAPSHOT_DIR"):
         setattr(_paths, name, value)
+        globals()[name] = value  # Keep module-level binding in sync
     else:
         globals()[name] = value
 
@@ -235,7 +242,7 @@ def iter_source_files(entity_type: str) -> list[Path]:
     if not entity_dir.is_dir():
         log.warning("Source directory not found: %s", entity_dir)
         return []
-    return sorted(f for f in entity_dir.rglob("*.jsonl.gz") if not f.name.startswith("."))
+    return sorted(f for f in entity_dir.rglob("*.gz") if not f.name.startswith(".") and (f.name.endswith(".jsonl.gz") or f.suffix == ".gz"))
 
 
 def _entity_from_path(path: Path) -> str | None:
