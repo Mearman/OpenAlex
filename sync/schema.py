@@ -18,9 +18,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from sync.common import extract_id
 
@@ -1251,42 +1248,74 @@ def probe_schema_multi(
     return schema
 
 
-# ── Public API ──────────────────────────────────────────────────────────
 
-_API_BASE = "https://api.openalex.org"
-# OpenAlex's random-sample recipe uses sample=100 with per_page=100.
-# Keep the sample size explicit rather than hiding it in the query string.
-_API_SAMPLE_SIZE = 100
-_API_SAMPLE_SEED = 42
-_SCHEMA_CACHE_VERSION = 1
-_SCHEMA_CACHE_PATH = Path(__file__).resolve().parent / ".cache" / "schema-cache.json"
+# ── Committed schema file ──────────────────────────────────────────────
 
-def _fetch_sample_records(entity: str) -> list[dict[str, Any]]:
-    """Fetch a deterministic random sample from the OpenAlex API."""
-    query = urlencode({
-        "sample": _API_SAMPLE_SIZE,
-        "per_page": _API_SAMPLE_SIZE,
-        "seed": _API_SAMPLE_SEED,
-    })
-    request = Request(
-        f"{_API_BASE}/{entity}?{query}",
-        headers={"Accept": "application/json"},
-        method="GET",
-    )
+_SCHEMA_FILE_VERSION = 1
+_SCHEMA_FILE = Path(__file__).resolve().parent.parent / "openalex.schema.json"
+_PROBE_SAMPLE_SIZE = 100
+
+
+def _schema_file_path() -> Path:
+    """Resolve the schema file path."""
+    return _SCHEMA_FILE
+
+
+@lru_cache(maxsize=1)
+def _load_schema_file() -> dict[str, dict[str, Any]]:
+    """Load entity schemas from the committed openalex.schema.json."""
+    path = _schema_file_path()
+    if not path.exists():
+        return {}
     try:
-        with urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Failed to fetch OpenAlex sample for {entity}") from exc
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("Ignoring unreadable schema file %s: %s", path, exc)
+        return {}
+    if not isinstance(payload, dict) or payload.get("version") != _SCHEMA_FILE_VERSION:
+        log.warning("Schema file version mismatch in %s", path)
+        return {}
+    entities = payload.get("entities")
+    if not isinstance(entities, dict):
+        return {}
+    return {e: s for e, s in entities.items() if isinstance(s, dict)}
 
-    results = payload.get("results")
-    if not isinstance(results, list) or not results:
-        raise RuntimeError(f"OpenAlex sample for {entity} returned no records")
 
-    records = [record for record in results if isinstance(record, dict)]
-    if not records:
-        raise RuntimeError(f"OpenAlex sample for {entity} returned no JSON objects")
-    return records
+def _write_schema_file(cache: dict[str, dict[str, Any]]) -> None:
+    """Write updated schema file atomically."""
+    path = _schema_file_path()
+    payload = {
+        "version": _SCHEMA_FILE_VERSION,
+        "entities": cache,
+    }
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+    _load_schema_file.cache_clear()
+
+
+def _load_entity_schema(entity: str) -> EntitySchema | None:
+    """Load a single entity schema from the committed schema file."""
+    cache = _load_schema_file()
+    raw = cache.get(entity)
+    if raw is None:
+        return None
+    try:
+        return EntitySchema.from_dict(raw)
+    except (KeyError, TypeError, ValueError) as exc:
+        log.warning("Ignoring corrupt schema entry for %s: %s", entity, exc)
+        return None
+
+
+def _store_entity_schema(entity: str, schema: EntitySchema) -> None:
+    """Update the committed schema file with a new/updated entity schema."""
+    cache = _load_schema_file()
+    cache[entity] = schema.to_dict()
+    _write_schema_file(cache)
+    log.info("Updated schema for %s in %s", entity, _schema_file_path())
+
+
+# ── Schema probing from JSONL ───────────────────────────────────────────
 
 
 def _schema_from_source_dir(
@@ -1300,100 +1329,75 @@ def _schema_from_source_dir(
     )
     if not files:
         raise FileNotFoundError(f"No source files found for {entity} in {source_dir}")
-
     records: list[dict[str, Any]] = []
     for file in files:
         for record in iter_jsonl(file):
             if isinstance(record, dict):
                 records.append(record)
-            if len(records) >= _API_SAMPLE_SIZE:
+            if len(records) >= _PROBE_SAMPLE_SIZE:
                 return probe_schema_multi(entity, records, seed_schema=seed_schema)
     if not records:
         raise RuntimeError(f"No readable records found for {entity} in {source_dir}")
     return probe_schema_multi(entity, records, seed_schema=seed_schema)
 
 
-@lru_cache(maxsize=None)
-def _schema_from_api(entity: str) -> EntitySchema:
-    return probe_schema_multi(entity, _fetch_sample_records(entity))
+def probe_schema_from_file(
+    entity: str,
+    jsonl_path: Path,
+) -> EntitySchema | None:
+    """Probe schema from a single JSONL file.
 
-
-@lru_cache(maxsize=1)
-def _load_schema_cache() -> dict[str, dict[str, Any]]:
-    if not _SCHEMA_CACHE_PATH.exists():
-        return {}
+    Used by CI to discover schema from a downloaded shard when no
+    committed schema entry exists for an entity. Returns None if the
+    file contains no valid records.
+    """
+    records: list[dict[str, Any]] = []
     try:
-        payload = json.loads(_SCHEMA_CACHE_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("Ignoring unreadable schema cache %s: %s", _SCHEMA_CACHE_PATH, exc)
-        return {}
-
-    if not isinstance(payload, dict) or payload.get("version") != _SCHEMA_CACHE_VERSION:
-        return {}
-
-    entities = payload.get("entities")
-    if not isinstance(entities, dict):
-        return {}
-
-    return {entity: schema for entity, schema in entities.items() if isinstance(schema, dict)}
-
-
-def _write_schema_cache(cache: dict[str, dict[str, Any]]) -> None:
-    _SCHEMA_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": _SCHEMA_CACHE_VERSION,
-        "entities": cache,
-    }
-    tmp_path = _SCHEMA_CACHE_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(_SCHEMA_CACHE_PATH)
-    _load_schema_cache.cache_clear()
-
-
-def _load_cached_entity_schema(entity: str) -> EntitySchema | None:
-    cache = _load_schema_cache()
-    raw = cache.get(entity)
-    if raw is None:
+        for record in iter_jsonl(jsonl_path):
+            if isinstance(record, dict):
+                records.append(record)
+            if len(records) >= _PROBE_SAMPLE_SIZE:
+                break
+    except Exception as exc:
+        log.warning("Failed to read %s for schema probe: %s", jsonl_path, exc)
         return None
-    try:
-        return EntitySchema.from_dict(raw)
-    except (KeyError, TypeError, ValueError) as exc:
-        log.warning("Ignoring corrupt schema cache entry for %s: %s", entity, exc)
+    if not records:
         return None
+    seed_schema = _load_entity_schema(entity)
+    return probe_schema_multi(entity, records, seed_schema=seed_schema)
 
 
-def _store_cached_entity_schema(entity: str, schema: EntitySchema) -> None:
-    cache = _load_schema_cache()
-    cache[entity] = schema.to_dict()
-    _write_schema_cache(cache)
+# ── Public API ──────────────────────────────────────────────────────────
 
 
 def get_entity_schema(entity: str, *, source_dir: Path | None = None) -> EntitySchema:
-    """Get the schema for an entity from local data or the cached API seed."""
-    cached_schema = _load_cached_entity_schema(entity)
+    """Get the schema for an entity.
+
+    Resolution order:
+    1. Committed schema file (openalex.schema.json)
+    2. Local source directory probe (if source_dir given and exists)
+
+    When probing from local data, the result is written back to the
+    committed schema file so subsequent calls (and CI jobs) can use it.
+    """
+    cached_schema = _load_entity_schema(entity)
 
     if source_dir is not None:
         resolved = source_dir.expanduser().resolve()
         if resolved.exists():
-            seed_schema = cached_schema
-            if seed_schema is None:
-                try:
-                    seed_schema = _schema_from_api(entity)
-                except Exception as exc:
-                    log.warning(
-                        "API schema seed unavailable for %s; using local probe only: %s",
-                        entity, exc,
-                    )
-            schema = _schema_from_source_dir(entity, resolved, seed_schema=seed_schema)
-            _store_cached_entity_schema(entity, schema)
+            schema = _schema_from_source_dir(
+                entity, resolved, seed_schema=cached_schema,
+            )
+            _store_entity_schema(entity, schema)
             return schema
 
     if cached_schema is not None:
         return cached_schema
 
-    schema = _schema_from_api(entity)
-    _store_cached_entity_schema(entity, schema)
-    return schema
+    raise RuntimeError(
+        f"No schema for {entity}. "
+        f"Add it to openalex.schema.json or provide source_dir."
+    )
 
 
 def _discover_entities(source_dir: Path) -> list[str]:
@@ -1423,5 +1427,5 @@ def all_entity_rel_types(*, source_dir: Path | None = None) -> dict[str, frozens
         resolved = source_dir.expanduser().resolve()
         entities = _discover_entities(resolved)
     else:
-        entities = sorted(_load_schema_cache().keys())
+        entities = sorted(_load_schema_file().keys())
     return {entity: entity_rel_types(entity, source_dir=source_dir) for entity in entities}

@@ -1,0 +1,628 @@
+{
+  "entities": {
+    "authors": {
+      "entity": "authors",
+      "fields": [
+        {
+          "id_path": "institution.id",
+          "json_key": "affiliations",
+          "pattern": "nested_id_ref",
+          "rel_name": "author_affiliations"
+        },
+        {
+          "extra_cols": [
+            "works_count",
+            "oa_works_count",
+            "cited_by_count"
+          ],
+          "json_key": "counts_by_year",
+          "pattern": "time_series",
+          "rel_name": "author_counts_by_year"
+        },
+        {
+          "json_key": "display_name_alternatives",
+          "pattern": "string_list",
+          "rel_name": "author_display_name_alternatives"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "author_external_ids"
+        },
+        {
+          "json_key": "last_known_institutions",
+          "pattern": "id_ref",
+          "rel_name": "author_last_known_institutions"
+        },
+        {
+          "json_key": "orcid",
+          "pattern": "id_ref",
+          "rel_name": "author_orcid"
+        },
+        {
+          "json_key": "topic_share",
+          "pattern": "topic_share",
+          "rel_name": "author_topic_share"
+        },
+        {
+          "extra_cols": [
+            "count",
+            "score"
+          ],
+          "id_path": "subfield.id",
+          "json_key": "topics",
+          "pattern": "nested_id_ref",
+          "rel_name": "author_topics"
+        },
+        {
+          "extra_cols": [
+            "col4",
+            "score",
+            "count"
+          ],
+          "id_path": "id",
+          "json_key": "x_concepts",
+          "pattern": "id_ref",
+          "rel_name": "author_x_concepts"
+        }
+      ],
+      "id_col": "author_id",
+      "id_path": "id"
+    },
+    "awards": {
+      "entity": "awards",
+      "fields": [
+        {
+          "json_key": "co_lead_investigator",
+          "pattern": "id_ref",
+          "rel_name": "award_co_lead_investigator"
+        },
+        {
+          "json_key": "funded_outputs",
+          "pattern": "url_list",
+          "rel_name": "award_funded_outputs"
+        },
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "funder",
+          "pattern": "taxonomy_parent",
+          "rel_name": "award_funders"
+        },
+        {
+          "json_key": "investigators",
+          "pattern": "id_ref",
+          "rel_name": "award_investigators"
+        },
+        {
+          "json_key": "lead_investigator",
+          "pattern": "id_ref",
+          "rel_name": "award_lead_investigator"
+        }
+      ],
+      "id_col": "award_id",
+      "id_path": "id"
+    },
+    "concepts": {
+      "entity": "concepts",
+      "fields": [
+        {
+          "json_key": "ancestors",
+          "pattern": "id_ref",
+          "rel_name": "concept_ancestors"
+        },
+        {
+          "extra_cols": [
+            "works_count",
+            "cited_by_count",
+            "oa_works_count"
+          ],
+          "json_key": "counts_by_year",
+          "pattern": "time_series",
+          "rel_name": "concept_counts_by_year"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "concept_external_ids"
+        },
+        {
+          "json_key": "related_concepts",
+          "pattern": "id_ref",
+          "rel_name": "concept_related_concepts"
+        }
+      ],
+      "id_col": "concept_id",
+      "id_path": "id"
+    },
+    "domains": {
+      "entity": "domains",
+      "fields": [
+        {
+          "json_key": "display_name_alternatives",
+          "pattern": "string_list",
+          "rel_name": "domain_display_name_alternatives"
+        },
+        {
+          "id_path": "id",
+          "json_key": "fields",
+          "pattern": "id_ref",
+          "rel_name": "domain_fields"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "domain_external_ids"
+        },
+        {
+          "id_path": "id",
+          "json_key": "siblings",
+          "pattern": "id_ref",
+          "rel_name": "domain_siblings"
+        }
+      ],
+      "id_col": "domain_id",
+      "id_path": "id"
+    },
+    "fields": {
+      "entity": "fields",
+      "fields": [
+        {
+          "json_key": "display_name_alternatives",
+          "pattern": "string_list",
+          "rel_name": "field_display_name_alternatives"
+        },
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "domain",
+          "pattern": "taxonomy_parent",
+          "rel_name": "field_domains"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "field_external_ids"
+        },
+        {
+          "id_path": "id",
+          "json_key": "siblings",
+          "pattern": "id_ref",
+          "rel_name": "field_siblings"
+        },
+        {
+          "id_path": "id",
+          "json_key": "subfields",
+          "pattern": "id_ref",
+          "rel_name": "field_subfields"
+        }
+      ],
+      "id_col": "field_id",
+      "id_path": "id"
+    },
+    "funders": {
+      "entity": "funders",
+      "fields": [
+        {
+          "json_key": "alternate_titles",
+          "pattern": "string_list",
+          "rel_name": "funder_alternate_titles"
+        },
+        {
+          "extra_cols": [
+            "works_count",
+            "oa_works_count",
+            "cited_by_count"
+          ],
+          "json_key": "counts_by_year",
+          "pattern": "time_series",
+          "rel_name": "funder_counts_by_year"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "funder_external_ids"
+        },
+        {
+          "json_key": "roles",
+          "pattern": "roles",
+          "rel_name": "funder_roles"
+        }
+      ],
+      "id_col": "funder_id",
+      "id_path": "id"
+    },
+    "institutions": {
+      "entity": "institutions",
+      "fields": [
+        {
+          "json_key": "associated_institutions",
+          "pattern": "id_ref",
+          "rel_name": "institution_associated_institutions"
+        },
+        {
+          "extra_cols": [
+            "works_count",
+            "cited_by_count",
+            "oa_works_count"
+          ],
+          "json_key": "counts_by_year",
+          "pattern": "time_series",
+          "rel_name": "institution_counts_by_year"
+        },
+        {
+          "json_key": "display_name_acronyms",
+          "pattern": "string_list",
+          "rel_name": "institution_display_name_acronyms"
+        },
+        {
+          "json_key": "display_name_alternatives",
+          "pattern": "string_list",
+          "rel_name": "institution_display_name_alternatives"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "institution_external_ids"
+        },
+        {
+          "json_key": "lineage",
+          "pattern": "url_list",
+          "rel_name": "institution_lineage"
+        },
+        {
+          "json_key": "repositories",
+          "pattern": "id_ref",
+          "rel_name": "institution_repositories"
+        },
+        {
+          "json_key": "roles",
+          "pattern": "roles",
+          "rel_name": "institution_roles"
+        },
+        {
+          "json_key": "topic_share",
+          "pattern": "topic_share",
+          "rel_name": "institution_topic_share"
+        },
+        {
+          "extra_cols": [
+            "count",
+            "score"
+          ],
+          "id_path": "subfield.id",
+          "json_key": "topics",
+          "pattern": "nested_id_ref",
+          "rel_name": "institution_topics"
+        }
+      ],
+      "id_col": "institution_id",
+      "id_path": "id"
+    },
+    "publishers": {
+      "entity": "publishers",
+      "fields": [
+        {
+          "json_key": "alternate_titles",
+          "pattern": "string_list",
+          "rel_name": "publisher_alternate_titles"
+        },
+        {
+          "extra_cols": [
+            "works_count",
+            "cited_by_count"
+          ],
+          "json_key": "counts_by_year",
+          "pattern": "time_series",
+          "rel_name": "publisher_counts_by_year"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "publisher_external_ids"
+        },
+        {
+          "json_key": "lineage",
+          "pattern": "url_list",
+          "rel_name": "publisher_lineage"
+        },
+        {
+          "json_key": "roles",
+          "pattern": "roles",
+          "rel_name": "publisher_roles"
+        },
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "parent_publisher",
+          "pattern": "taxonomy_parent",
+          "rel_name": "publisher_parent_publishers"
+        }
+      ],
+      "id_col": "publisher_id",
+      "id_path": "id"
+    },
+    "sources": {
+      "entity": "sources",
+      "fields": [
+        {
+          "json_key": "alternate_titles",
+          "pattern": "string_list",
+          "rel_name": "source_alternate_titles"
+        },
+        {
+          "json_key": "apc_prices",
+          "pattern": "apc_prices",
+          "rel_name": "source_apc_prices"
+        },
+        {
+          "extra_cols": [
+            "works_count",
+            "oa_works_count",
+            "cited_by_count"
+          ],
+          "json_key": "counts_by_year",
+          "pattern": "time_series",
+          "rel_name": "source_counts_by_year"
+        },
+        {
+          "json_key": "host_organization",
+          "pattern": "id_ref",
+          "rel_name": "source_host_organization"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "source_external_ids"
+        },
+        {
+          "json_key": "issn",
+          "pattern": "issn",
+          "rel_name": "source_issn"
+        },
+        {
+          "json_key": "societies",
+          "pattern": "societies",
+          "rel_name": "source_societies"
+        },
+        {
+          "json_key": "topic_share",
+          "pattern": "topic_share",
+          "rel_name": "source_topic_share"
+        },
+        {
+          "extra_cols": [
+            "count",
+            "score"
+          ],
+          "id_path": "subfield.id",
+          "json_key": "topics",
+          "pattern": "nested_id_ref",
+          "rel_name": "source_topics"
+        },
+        {
+          "json_key": "host_organization_lineage",
+          "pattern": "url_list",
+          "rel_name": "source_host_organization_lineage"
+        }
+      ],
+      "id_col": "source_id",
+      "id_path": "id"
+    },
+    "subfields": {
+      "entity": "subfields",
+      "fields": [
+        {
+          "json_key": "display_name_alternatives",
+          "pattern": "string_list",
+          "rel_name": "subfield_display_name_alternatives"
+        },
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "domain",
+          "pattern": "taxonomy_parent",
+          "rel_name": "subfield_domains"
+        },
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "field",
+          "pattern": "taxonomy_parent",
+          "rel_name": "subfield_fields"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "subfield_external_ids"
+        },
+        {
+          "id_path": "id",
+          "json_key": "siblings",
+          "pattern": "id_ref",
+          "rel_name": "subfield_siblings"
+        },
+        {
+          "id_path": "id",
+          "json_key": "topics",
+          "pattern": "id_ref",
+          "rel_name": "subfield_topics"
+        }
+      ],
+      "id_col": "subfield_id",
+      "id_path": "id"
+    },
+    "topics": {
+      "entity": "topics",
+      "fields": [
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "domain",
+          "pattern": "taxonomy_parent",
+          "rel_name": "topic_domains"
+        },
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "field",
+          "pattern": "taxonomy_parent",
+          "rel_name": "topic_fields"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "topic_external_ids"
+        },
+        {
+          "json_key": "keywords",
+          "pattern": "string_list",
+          "rel_name": "topic_keywords"
+        },
+        {
+          "id_path": "id",
+          "json_key": "siblings",
+          "pattern": "id_ref",
+          "rel_name": "topic_siblings"
+        },
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "subfield",
+          "pattern": "taxonomy_parent",
+          "rel_name": "topic_subfields"
+        }
+      ],
+      "id_col": "topic_id",
+      "id_path": "id"
+    },
+    "works": {
+      "entity": "works",
+      "fields": [
+        {
+          "json_key": "abstract_inverted_index",
+          "pattern": "json_blob",
+          "rel_name": "work_abstract_inverted_index"
+        },
+        {
+          "extra_cols": [
+            "author_position",
+            "is_corresponding"
+          ],
+          "id_path": "author.id",
+          "json_key": "authorships",
+          "nested": [
+            {
+              "id_path": "id",
+              "json_key": "institutions",
+              "pattern": "id_ref",
+              "rel_name": "work_authorships_institutions"
+            }
+          ],
+          "pattern": "nested_id_ref",
+          "rel_name": "work_authorships"
+        },
+        {
+          "json_key": "awards",
+          "pattern": "awards",
+          "rel_name": "work_awards"
+        },
+        {
+          "extra_cols": [
+            "level",
+            "score"
+          ],
+          "id_path": "id",
+          "json_key": "concepts",
+          "pattern": "id_ref",
+          "rel_name": "work_concepts"
+        },
+        {
+          "json_key": "corresponding_author_ids",
+          "pattern": "url_list",
+          "rel_name": "work_corresponding_author_ids"
+        },
+        {
+          "json_key": "corresponding_institution_ids",
+          "pattern": "url_list",
+          "rel_name": "work_corresponding_institution_ids"
+        },
+        {
+          "extra_cols": [
+            "cited_by_count"
+          ],
+          "json_key": "counts_by_year",
+          "pattern": "time_series",
+          "rel_name": "work_counts_by_year"
+        },
+        {
+          "json_key": "funders",
+          "pattern": "id_ref",
+          "rel_name": "work_funders"
+        },
+        {
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "work_external_ids"
+        },
+        {
+          "json_key": "indexed_in",
+          "pattern": "id_ref",
+          "rel_name": "work_indexed_in"
+        },
+        {
+          "json_key": "institutions",
+          "pattern": "id_ref",
+          "rel_name": "work_institutions"
+        },
+        {
+          "extra_cols": [
+            "score"
+          ],
+          "id_path": "id",
+          "json_key": "keywords",
+          "pattern": "slug_ref",
+          "rel_name": "work_keywords",
+          "target_col": "keyword_id"
+        },
+        {
+          "json_key": "locations",
+          "pattern": "locations",
+          "rel_name": "work_locations"
+        },
+        {
+          "json_key": "mesh",
+          "pattern": "id_ref",
+          "rel_name": "work_mesh"
+        },
+        {
+          "json_key": "referenced_works",
+          "pattern": "id_ref",
+          "rel_name": "work_referenced_works"
+        },
+        {
+          "json_key": "related_works",
+          "pattern": "id_ref",
+          "rel_name": "work_related_works"
+        },
+        {
+          "json_key": "sustainable_development_goals",
+          "pattern": "id_ref",
+          "rel_name": "work_sustainable_development_goals"
+        },
+        {
+          "extra_cols": [
+            "score"
+          ],
+          "id_path": "subfield.id",
+          "json_key": "topics",
+          "pattern": "nested_id_ref",
+          "rel_name": "work_topics"
+        }
+      ],
+      "id_col": "work_id",
+      "id_path": "id"
+    }
+  },
+  "version": 1
+}
