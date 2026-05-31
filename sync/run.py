@@ -35,6 +35,26 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     )
 
 
+def _validate_slice(slice_index: int | None, slice_total: int | None) -> None:
+    """Validate that --slice-index and --slice-total form a coherent pair.
+
+    Either both are provided (and 0 <= index < total), or neither is.
+    """
+    if slice_index is None and slice_total is None:
+        return
+    if slice_index is None or slice_total is None:
+        raise SystemExit(
+            "--slice-index and --slice-total must be provided together"
+        )
+    if slice_total <= 0:
+        raise SystemExit("--slice-total must be a positive integer")
+    if not (0 <= slice_index < slice_total):
+        raise SystemExit(
+            f"--slice-index ({slice_index}) must satisfy "
+            f"0 <= slice-index < slice-total ({slice_total})"
+        )
+
+
 def cmd_sync(args) -> None:
     """Sync .gz files from OpenAlex S3."""
     from sync.download import run_sync
@@ -50,6 +70,8 @@ def cmd_sync(args) -> None:
 
 def cmd_extract(args) -> None:
     """Extract parquet from snapshot JSONL."""
+    _validate_slice(args.slice_index, args.slice_total)
+
     from sync.extract import main as extract_main
 
     extract_main(
@@ -198,9 +220,22 @@ def main():
     # extract
     p_extract = subparsers.add_parser("extract", help="Extract parquet")
     p_extract.add_argument("--entity", type=str, default=None)
-    p_extract.add_argument("--workers", type=int, default=None)
-    p_extract.add_argument("--slice-index", type=int, default=None)
-    p_extract.add_argument("--slice-total", type=int, default=None)
+    p_extract.add_argument(
+        "--workers", type=int, default=None,
+        help="Parallel worker processes. Default: auto-sized from RAM and CPU count.",
+    )
+    p_extract.add_argument(
+        "--slice-index", type=int, default=None,
+        help=(
+            "Process only the slice_index-th of slice_total chunks "
+            "(modulo source-file index). 0-based. Use together with --slice-total "
+            "to split work across machines."
+        ),
+    )
+    p_extract.add_argument(
+        "--slice-total", type=int, default=None,
+        help="Total number of slices for distributed processing. Use with --slice-index.",
+    )
     p_extract.add_argument("--force", action="store_true")
 
     # commit
