@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import hashlib
+import os
 from functools import lru_cache
 import multiprocessing
 import shutil
@@ -51,6 +52,44 @@ _BATCH_SIZE = 4_000_000
 _PROGRESS_INTERVAL = 1_000_000
 _DEFAULT_WORKERS = 6
 
+# Memory model: reserve ~2 GB for the OS and assume each worker peaks
+# around 6 GB resident (zstd compressor + PyArrow batch + Python heap).
+# Empirically, 8 workers on 16 GB causes swap thrashing; 8 on 64 GB is fine.
+_RAM_HEADROOM_GB = 2
+_RAM_PER_WORKER_GB = 6
+
+
+def _auto_workers() -> int:
+    """Pick a worker count that fits available CPU and RAM.
+
+    Uses ``sysconf`` to read total physical memory on Unix (Linux, macOS).
+    Falls back to ``_DEFAULT_WORKERS`` capped by the CPU count when
+    ``sysconf`` is not available (e.g. Windows).
+
+    The chosen count is logged so the caller can audit the decision.
+    """
+    cpu_count = os.cpu_count() or 1
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        phys_pages = os.sysconf("SC_PHYS_PAGES")
+        total_bytes = page_size * phys_pages
+    except (AttributeError, ValueError, OSError):
+        # Non-Unix or sysconf names unavailable — fall back to CPU-bounded default.
+        chosen = max(1, min(cpu_count, _DEFAULT_WORKERS))
+        log.info(
+            "Auto-sized workers to %d (RAM detection unavailable, %d CPUs)",
+            chosen, cpu_count,
+        )
+        return chosen
+
+    total_gb = total_bytes / (1024 ** 3)
+    by_ram = max(1, int((total_gb - _RAM_HEADROOM_GB) // _RAM_PER_WORKER_GB))
+    chosen = max(1, min(cpu_count, by_ram))
+    log.info(
+        "Auto-sized workers to %d (%.0fGB RAM, %d CPUs)",
+        chosen, total_gb, cpu_count,
+    )
+    return chosen
 
 
 # Per-entity extraction functions removed. All extraction is schema-driven
@@ -768,7 +807,10 @@ def convert_relationships(
             slice_index, slice_total, len(source_files),
         )
 
-    n_workers = workers if workers is not None else min(_DEFAULT_WORKERS, len(source_files))
+    if workers is not None:
+        n_workers = workers
+    else:
+        n_workers = min(_auto_workers(), len(source_files))
     n_workers = max(1, n_workers)
     effective_batch_size = batch_size if batch_size is not None else _BATCH_SIZE
 
