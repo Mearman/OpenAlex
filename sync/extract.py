@@ -227,6 +227,66 @@ def _completed_source_keys(output_dir: Path) -> set[str]:
     return result
 
 
+def _hf_completed_source_keys(
+    entity: str,
+    repo_id: str | None = None,
+) -> dict[str, set[str]]:
+    """Return parquet shard stems already present on the HuggingFace remote.
+
+    Used for cross-machine resume: when M3 uploads parquets to HF, mini's
+    next sync invocation will see them via this lookup and skip the
+    corresponding source files instead of re-extracting.
+
+    Returns ``{rel_name: set of shard_stems}`` matching the structure of
+    ``_completed_source_keys`` so the two can be unioned per rel type.
+
+    On any HF API failure, returns an empty dict and falls back silently
+    to local-only resume. Disable with ``OPENALEX_HF_RESUME=0``.
+    """
+    if os.environ.get("OPENALEX_HF_RESUME", "1") == "0":
+        return {}
+
+    if repo_id is None:
+        repo_id = os.environ.get("OPENALEX_HF_REPO", "Mearman/OpenAlex")
+
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        all_files = api.list_repo_files(repo_id, repo_type="dataset")
+    except Exception as exc:
+        log.warning(
+            "HF list_repo_files failed for %s (%s) — falling back to local-only resume",
+            repo_id, exc,
+        )
+        return {}
+
+    from sync.schema import _singular as _entity_singular
+    singular = _entity_singular(entity)
+    entity_prefix_path = f"data/{entity}/"
+
+    by_rel: dict[str, set[str]] = {}
+    for f in all_files:
+        if not f.startswith(entity_prefix_path) or not f.endswith(".parquet"):
+            continue
+        rel_path = f[len(entity_prefix_path):]
+        parts = rel_path.split("/", 1)
+        if len(parts) != 2:
+            continue
+        subtable, filename = parts
+        # Reconstruct rel_name: e.g. entity="authors", subtable="counts_by_year"
+        # → rel_name "author_counts_by_year". Matches nested_rt_path's mapping.
+        rel_name = f"{singular}_{subtable}"
+        source_key = filename[:-len(".parquet")]
+        by_rel.setdefault(rel_name, set()).add(source_key)
+
+    total_keys = sum(len(s) for s in by_rel.values())
+    log.info(
+        "HF resume: %s — %d shard stems present on HF across %d rel types",
+        entity, total_keys, len(by_rel),
+    )
+    return by_rel
+
+
 def _count_shard_rows(output_dir: Path) -> tuple[int, int]:
     """Count total rows and number of valid shards in output_dir.
 
@@ -916,6 +976,12 @@ def convert_relationships(
     #
     result: dict[str, int] = {}
 
+    # HF-aware resume: query the HuggingFace dataset once at startup and
+    # treat shards already present on HF as completed. Avoids re-extracting
+    # files another machine (e.g. a parallel worker on different hardware)
+    # has already uploaded.
+    hf_completed = _hf_completed_source_keys(entity_type)
+
     # Build per-type pending-file sets and union of all files needed
     all_pending_types: list[str] = []
     type_completed_keys: dict[str, set[str]] = {}
@@ -926,7 +992,8 @@ def convert_relationships(
         _rt_dir = rt_dir(_output_dir, rt)
         create_output_dir(_rt_dir)
 
-        completed = _completed_source_keys(_rt_dir)
+        local_completed = _completed_source_keys(_rt_dir)
+        completed = local_completed | hf_completed.get(rt, set())
         pending = _compute_pending_source_files(source_files, completed)
 
         if not pending:
