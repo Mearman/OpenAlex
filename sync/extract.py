@@ -241,11 +241,8 @@ def _hf_completed_source_keys(
     ``_completed_source_keys`` so the two can be unioned per rel type.
 
     On any HF API failure, returns an empty dict and falls back silently
-    to local-only resume. Disable with ``OPENALEX_HF_RESUME=0``.
+    to local-only resume.
     """
-    if os.environ.get("OPENALEX_HF_RESUME", "1") == "0":
-        return {}
-
     if repo_id is None:
         repo_id = os.environ.get("OPENALEX_HF_REPO", "Mearman/OpenAlex")
 
