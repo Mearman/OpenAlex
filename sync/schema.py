@@ -12,8 +12,10 @@ snapshot get picked up without changes to this module.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -1320,6 +1322,114 @@ def _store_entity_schema(entity: str, schema: EntitySchema) -> None:
     log.info("Updated schema for %s in %s", entity, _schema_file_path())
 
 
+# ── Probe cache ─────────────────────────────────────────────────────────
+# The probe walks JSON records — slow on cold reads (minutes per entity).
+# Cache the final merged schema on disk, keyed by the source file set so
+# the cache invalidates automatically when the snapshot changes.
+
+_PROBE_CACHE_DIR = Path(
+    os.environ.get(
+        "OPENALEX_SCHEMA_CACHE_DIR",
+        str(Path.home() / ".cache" / "openalex-sync"),
+    )
+).expanduser()
+
+
+def _probe_cache_disabled() -> bool:
+    """Return True when the cache should be bypassed via env override."""
+    value = os.environ.get("OPENALEX_SCHEMA_NOCACHE")
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _entity_source_files(entity: str, source_dir: Path) -> list[Path]:
+    """List the .gz source files belonging to *entity* under *source_dir*.
+
+    Mirrors the glob the probe itself uses, but scoped to the entity's
+    own subdirectory so the cache key isn't perturbed by unrelated
+    entities. Falls back to the parent when no entity subdir exists.
+    """
+    entity_dir = source_dir / entity
+    search_root = entity_dir if entity_dir.is_dir() else source_dir
+    return sorted(
+        file for file in search_root.glob("**/*.gz")
+        if not file.name.startswith("._")
+        and (file.name.endswith(".jsonl.gz") or file.suffix == ".gz")
+    )
+
+
+def _probe_cache_key(entity: str, source_dir: Path) -> str:
+    """SHA256 of the sorted relative source filenames for *entity*.
+
+    Stable across runs as long as the file set is unchanged; changes the
+    moment a file is added, removed, or renamed.
+    """
+    files = _entity_source_files(entity, source_dir)
+    hasher = hashlib.sha256()
+    for file in files:
+        try:
+            rel = file.relative_to(source_dir)
+        except ValueError:
+            rel = file
+        hasher.update(str(rel).encode("utf-8"))
+        hasher.update(b"\n")
+    return hasher.hexdigest()
+
+
+def _probe_cache_path(entity: str, key: str) -> Path:
+    return _PROBE_CACHE_DIR / f"schema_{entity}_{key}.json"
+
+
+def _load_probe_cache(entity: str, key: str) -> EntitySchema | None:
+    """Return the cached merged schema for *entity* if present and current."""
+    path = _probe_cache_path(entity, key)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("Ignoring unreadable schema probe cache %s: %s", path, exc)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("cache_key") != key or payload.get("entity") != entity:
+        return None
+    schema_dict = payload.get("schema")
+    if not isinstance(schema_dict, dict):
+        return None
+    try:
+        return EntitySchema.from_dict(schema_dict)
+    except (KeyError, TypeError, ValueError) as exc:
+        log.warning("Ignoring corrupt schema probe cache %s: %s", path, exc)
+        return None
+
+
+def _store_probe_cache(entity: str, key: str, schema: EntitySchema) -> None:
+    """Persist *schema* to the probe cache, keyed by *key*."""
+    try:
+        _PROBE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.warning("Cannot create schema cache dir %s: %s", _PROBE_CACHE_DIR, exc)
+        return
+    path = _probe_cache_path(entity, key)
+    payload = {
+        "version": _SCHEMA_FILE_VERSION,
+        "entity": entity,
+        "cache_key": key,
+        "schema": schema.to_dict(),
+    }
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+    except OSError as exc:
+        log.warning("Cannot write schema probe cache %s: %s", path, exc)
+
+
 # ── Schema probing from JSONL ───────────────────────────────────────────
 
 
@@ -1379,21 +1489,37 @@ def get_entity_schema(entity: str, *, source_dir: Path | None = None) -> EntityS
     """Get the schema for an entity.
 
     Resolution order:
-    1. Committed schema file (openalex.schema.json)
-    2. Local source directory probe (if source_dir given and exists)
+    1. Committed schema file (openalex.schema.json) merged with on-disk
+       probe cache keyed by the source file set (skips the slow re-probe
+       when the source files are unchanged).
+    2. Local source directory probe (if source_dir given and exists);
+       result is cached to disk and written back to the committed schema.
 
-    When probing from local data, the result is written back to the
-    committed schema file so subsequent calls (and CI jobs) can use it.
+    The ``OPENALEX_SCHEMA_NOCACHE`` env var forces a re-probe.
     """
     cached_schema = _load_entity_schema(entity)
 
     if source_dir is not None:
         resolved = source_dir.expanduser().resolve()
         if resolved.exists():
+            use_cache = not _probe_cache_disabled()
+            cache_key = _probe_cache_key(entity, resolved) if use_cache else ""
+
+            if use_cache:
+                cached_probe = _load_probe_cache(entity, cache_key)
+                if cached_probe is not None:
+                    log.info(
+                        "Using cached schema probe for %s (key %s…)",
+                        entity, cache_key[:12],
+                    )
+                    return cached_probe
+
             schema = _schema_from_source_dir(
                 entity, resolved, seed_schema=cached_schema,
             )
             _store_entity_schema(entity, schema)
+            if use_cache:
+                _store_probe_cache(entity, cache_key, schema)
             return schema
 
     if cached_schema is not None:
