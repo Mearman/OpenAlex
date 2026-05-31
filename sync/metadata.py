@@ -326,15 +326,47 @@ def update_readme(
     if entities is None:
         entities = all_entities_info()
 
-    text = readme_path.read_text()
+    text = readme_path.read_text(encoding="utf-8")
 
-    # Split frontmatter and body
-    if not text.startswith("---"):
-        raise ValueError("README.md does not start with YAML frontmatter")
+    # Tolerantly locate the opening frontmatter delimiter:
+    #   - skip a UTF-8 BOM
+    #   - skip leading blank lines
+    # Then look for `---` followed by a newline.
+    BOM = "﻿"
+    prefix = ""
+    body_text = text
+    if body_text.startswith(BOM):
+        prefix += BOM
+        body_text = body_text[len(BOM):]
+    stripped = body_text.lstrip("\n")
+    if stripped != body_text:
+        prefix += body_text[: len(body_text) - len(stripped)]
+        body_text = stripped
 
-    end_fm = text.index("\n---", 3)
-    frontmatter = text[3:end_fm]
-    body = text[end_fm + 4:]
+    has_open_delim = body_text.startswith("---\n") or body_text == "---" or body_text.startswith("---\r\n")
+    end_fm = body_text.find("\n---", 3) if has_open_delim else -1
+
+    if not has_open_delim or end_fm < 0:
+        # No (well-formed) frontmatter — insert a fresh block at the top.
+        # The dataset_info generator will fill it in below.
+        if has_open_delim and end_fm < 0:
+            log.warning(
+                "Malformed YAML frontmatter in %s (opening --- found, no closing ---); "
+                "inserting a fresh block above existing content",
+                readme_path,
+            )
+        else:
+            log.warning(
+                "No YAML frontmatter found in %s; inserting a fresh block",
+                readme_path,
+            )
+        frontmatter = ""
+        # Drop only the BOM from the preserved body; keep any user blank
+        # lines intact below the new frontmatter delimiter.
+        body = text[len(BOM):] if text.startswith(BOM) else text
+    else:
+        frontmatter = body_text[3:end_fm]
+        body = body_text[end_fm + 4:]
 
     # Generate fresh dataset_info
     ds_info_yaml = generate_dataset_info_yaml(entities)
@@ -408,6 +440,15 @@ def update_readme(
                 insert_idx += 1
 
             frontmatter = "\n".join(fm_lines)
+        else:
+            # No existing configs: open a fresh configs: section at the
+            # top of the frontmatter so the parquet sub-tables are
+            # discoverable by the HF dataset loader.
+            frontmatter = (
+                "configs:\n"
+                + "\n".join(new_config_lines)
+                + ("\n" + frontmatter if frontmatter else "")
+            )
 
     # Reassemble — normalise blank lines between frontmatter and body
     body = body.lstrip('\n')
