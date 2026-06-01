@@ -286,24 +286,21 @@ def _hf_completed_source_keys(
 
 
 def _count_shard_rows(output_dir: Path) -> tuple[int, int]:
-    """Count total rows and number of valid shards in output_dir.
+    """Count number of valid shards in output_dir. Returns ``(0, shard_count)``.
 
-    Returns ``(total_rows, shard_count)``.
+    Previously also read each parquet footer to sum ``num_rows`` — useful for
+    informational logging but extremely slow on APFS with thousands of files
+    per relationship (and the totals were not used for any control-flow
+    decision, only printed). Returns 0 for ``total_rows`` and lets the
+    finalise step record shard count only.
     """
-    total_rows = 0
-    shard_count = 0
     if not output_dir.exists():
         return 0, 0
-    for shard in output_dir.glob("*.parquet"):
-        if shard.name.startswith("._"):
-            continue
-        try:
-            pf = pq.ParquetFile(str(shard))
-            total_rows += pf.metadata.num_rows
-            shard_count += 1
-        except Exception:
-            pass
-    return total_rows, shard_count
+    shard_count = sum(
+        1 for shard in output_dir.glob("*.parquet")
+        if not shard.name.startswith("._")
+    )
+    return 0, shard_count
 
 
 # Legacy loader retained for migration compatibility
