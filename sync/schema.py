@@ -1438,10 +1438,22 @@ def _schema_from_source_dir(
     source_dir: Path,
     seed_schema: EntitySchema | None = None,
 ) -> EntitySchema:
-    files = sorted(
-        file for file in source_dir.glob("**/*.gz")
-        if not file.name.startswith("._") and (file.name.endswith(".jsonl.gz") or file.suffix == ".gz")
-    )
+    # Use os.walk with followlinks=True because pathlib's glob("**/*.gz")
+    # does not traverse symlinked directories by default. This matters when
+    # a worker stages a partition into the snapshot dir via a symlink to
+    # an external mount (e.g. SSD), where the entity dir contains a symlink
+    # to the partition source files.
+    import os as _os
+    found: list[Path] = []
+    if source_dir.is_dir():
+        for root, _dirs, names in _os.walk(source_dir, followlinks=True):
+            root_path = Path(root)
+            for name in names:
+                if name.startswith("._"):
+                    continue
+                if name.endswith(".jsonl.gz") or name.endswith(".gz"):
+                    found.append(root_path / name)
+    files = sorted(found)
     if not files:
         raise FileNotFoundError(f"No source files found for {entity} in {source_dir}")
     records: list[dict[str, Any]] = []
