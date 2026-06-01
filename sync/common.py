@@ -237,12 +237,22 @@ def format_size(nbytes: float) -> str:
 
 
 def iter_source_files(entity_type: str) -> list[Path]:
-    """List source files for an entity type from SNAPSHOT_DIR."""
+    """List source files for an entity type from SNAPSHOT_DIR.
+
+    Walks only ``updated_date=*`` partition subdirectories rather than the
+    whole entity tree — avoids stat'ing tens of thousands of parquet files
+    in relationship subdirectories (``concepts/``, ``affiliations/`` etc.)
+    which are not source files. On APFS with relationship subdirs populated,
+    the difference is multiple minutes vs sub-second.
+    """
     entity_dir = SNAPSHOT_DIR / entity_type
     if not entity_dir.is_dir():
         log.warning("Source directory not found: %s", entity_dir)
         return []
-    return sorted(f for f in entity_dir.rglob("*.gz") if not f.name.startswith(".") and (f.name.endswith(".jsonl.gz") or f.suffix == ".gz"))
+    return sorted(
+        f for f in entity_dir.glob("updated_date=*/*.gz")
+        if not f.name.startswith(".") and (f.name.endswith(".jsonl.gz") or f.suffix == ".gz")
+    )
 
 
 def _entity_from_path(path: Path) -> str | None:
