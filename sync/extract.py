@@ -206,25 +206,26 @@ def _write_unit_provenance(
 
 
 def _completed_source_keys(output_dir: Path) -> set[str]:
-    """Return source keys that have a valid parquet shard on disk.
+    """Return source keys that have a parquet shard on disk.
 
-    Scans for ``*.parquet`` files in *output_dir* (excluding ``_units/``
-    subdirectory), validates each has a readable footer, and extracts
-    the source key from the filename.
+    Lists ``*.parquet`` files in *output_dir* by name only. Footer
+    validation has been removed because it required opening every shard
+    and reading metadata via PyArrow — on ExFAT with thousands of files
+    per relationship this took several minutes per directory.
+
+    Workers will encounter and skip any corrupt shard during actual use.
+    Empty/zero-row parquets are valid completion markers (written
+    deliberately for source files that produce no rows for a given
+    relationship), so we no longer need to distinguish "has data" from
+    "valid footer" at startup.
     """
-    result: set[str] = set()
     if not output_dir.exists():
-        return result
-    for shard in output_dir.glob("*.parquet"):
-        if shard.name.startswith("._"):
-            continue
-        try:
-            pf = pq.ParquetFile(str(shard))
-            _ = pf.metadata  # validate footer is readable
-            result.add(shard.stem)
-        except Exception:
-            log.warning("Invalid parquet shard: %s, ignoring", shard.name)
-    return result
+        return set()
+    return {
+        shard.stem
+        for shard in output_dir.glob("*.parquet")
+        if not shard.name.startswith("._")
+    }
 
 
 def _hf_completed_source_keys(
