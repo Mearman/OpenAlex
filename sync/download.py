@@ -9,6 +9,7 @@ files must be pruned to prevent incorrect entity counts.
 from __future__ import annotations
 
 import concurrent.futures
+import gzip
 import logging
 import os
 import sys
@@ -94,22 +95,68 @@ def _local_path_for_key(key: str, dest_dir: Path) -> Path:
     return dest_dir / local_key
 
 
-def _download_s3_file(s3, key: str, dest_dir: Path, dry_run: bool = False) -> dict:
-    """Download a single file, skipping if it already exists with correct size."""
+# Chunk size for streaming gzip verification — decompress in 1 MiB blocks so a
+# corrupt file is detected without ever loading the whole stream into memory.
+_VERIFY_CHUNK_BYTES = 1024 * 1024
+
+
+def verify_gzip(path: Path) -> bool:
+    """Return True iff the file fully decompresses.
+
+    Reads the entire gzip stream in 1 MiB chunks to a throwaway buffer, catching
+    both truncation and trailing-garbage mid-stream.  Decompresses to nothing —
+    never loads the file into memory.  Any decompression failure
+    (``gzip.BadGzipFile``, ``EOFError``, ``OSError``) returns False.
+    """
+    try:
+        with gzip.open(path, "rb") as fh:
+            while fh.read(_VERIFY_CHUNK_BYTES):
+                pass
+    except (EOFError, gzip.BadGzipFile, OSError):
+        return False
+    return True
+
+
+def _download_s3_file(
+    s3, key: str, dest_dir: Path, dry_run: bool = False, verify_content: bool = False
+) -> dict:
+    """Download a single file, skipping if it already exists with correct size.
+
+    When ``verify_content`` is True and a right-size local file exists, also
+    decompress it via :func:`verify_gzip`; a corrupt-but-right-size file falls
+    through to re-download.  After a verify-triggered re-download, the freshly
+    written file is re-checked: if it is still corrupt the file is reported as a
+    download error so the caller can surface it loudly.
+    """
     local_path = _local_path_for_key(key, dest_dir)
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
+    redownload_for_corruption = False
     if local_path.exists():
         local_size = local_path.stat().st_size
         remote_size = s3.head_object(Bucket=S3_BUCKET, Key=key)["ContentLength"]
         if local_size == remote_size:
-            return {"key": key, "status": "skipped", "size": remote_size}
+            if not verify_content:
+                return {"key": key, "status": "skipped", "size": remote_size}
+            if verify_gzip(local_path):
+                return {"key": key, "status": "skipped", "size": remote_size}
+            log.warning(
+                "Right-size but corrupt gzip, re-downloading: %s", key
+            )
+            redownload_for_corruption = True
 
     if dry_run:
         return {"key": key, "status": "dry_run", "size": 0}
 
     s3.download_file(S3_BUCKET, key, str(local_path))
     size = local_path.stat().st_size
+
+    if redownload_for_corruption and not verify_gzip(local_path):
+        log.error(
+            "Still corrupt after re-download (gzip stream unreadable): %s", key
+        )
+        return {"key": key, "status": "corrupt", "size": size}
+
     return {"key": key, "status": "downloaded", "size": size}
 
 
@@ -150,6 +197,7 @@ def run_sync(
     workers: int = 8,
     dry_run: bool = False,
     delete: bool = True,
+    verify_content: bool = False,
 ):
     """Sync OpenAlex snapshot from S3: download new/changed files, optionally
     delete local files not present remotely.
@@ -217,7 +265,9 @@ def run_sync(
 
     def worker(obj):
         thread_s3 = _get_s3_client()
-        return _download_s3_file(thread_s3, obj["key"], dest)
+        return _download_s3_file(
+            thread_s3, obj["key"], dest, verify_content=verify_content
+        )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(worker, obj): obj for obj in objects}
@@ -229,6 +279,10 @@ def run_sync(
                     downloaded_bytes += result["size"]
                 elif result["status"] == "skipped":
                     skipped += 1
+                elif result["status"] == "corrupt":
+                    # Still corrupt after a verify-triggered re-download — never
+                    # silently accept it; surface via the error/exit path.
+                    errors.append(result["key"])
                 if i % 100 == 0:
                     elapsed = time.time() - start
                     rate = i / elapsed if elapsed > 0 else 0
