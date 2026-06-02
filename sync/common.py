@@ -210,6 +210,7 @@ log = logging.getLogger("openalex-sync")
 # ── Skipped-file tracking ────────────────────────────────────────────────
 
 _skipped_missing_files: list[str] = []
+_corrupt_files: list[str] = []
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -318,48 +319,105 @@ def _redownload_corrupt(path: Path) -> None:
         raise
 
 
-def iter_jsonl(path: Path) -> Iterator[dict]:
-    """Stream JSON objects from a .gz or .jsonl file.
+# Corrupt-gzip errors that mean "the source file's compressed stream is bad":
+# truncation (EOFError) and valid-first-member-plus-trailing-garbage
+# (gzip.BadGzipFile, which subclasses OSError; isal/igzip raise OSError-like).
+_CORRUPT_GZIP_ERRORS = (EOFError, gzip.BadGzipFile, OSError)
 
-    On EOFError (truncated gzip), redownloads and retries once.
+
+def iter_jsonl(path: Path) -> Iterator[dict]:
+    """Stream JSON objects from a .gz or .jsonl file, self-healing on corruption.
+
+    If the gzip stream is corrupt (truncated → EOFError, or valid first member
+    followed by trailing garbage → gzip.BadGzipFile/OSError), the file is
+    redownloaded from S3 and re-read, skipping the records already yielded so
+    the consumer never sees duplicates.
+
+    Assumption: corruption is prefix-valid (truncation or trailing garbage),
+    so the authoritative re-downloaded file's first N records are identical to
+    the N records already yielded before the failure. This holds for the
+    real-world corruption observed (truncated transfers, appended garbage).
+
+    If the file is absent on S3, it is recorded in _skipped_missing_files and
+    iteration ends quietly. If the file is STILL corrupt after re-download, the
+    failure is loud: it is logged, recorded in _corrupt_files, and re-raised.
+
+    Per-line JSONDecodeError/ValueError remains tolerated (line skipped).
     """
     opener = _gzip_open if path.name.endswith(".jsonl.gz") or path.suffix == ".gz" else open
-    try:
+
+    def _decode(skip_n: int) -> Iterator[dict]:
+        """Yield decoded records, skipping the first ``skip_n`` decoded records.
+
+        Counting and skipping is by *decoded* record (not raw line), so the
+        skip count matches what the consumer has already observed.
+        """
+        decoded = 0
         with opener(path, "rb") as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    try:
-                        yield _json_loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-    except EOFError:
-        log.warning("Truncated gzip file: %s — attempting redownload", path.name)
+                if not line:
+                    continue
+                try:
+                    record = _json_loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if decoded < skip_n:
+                    decoded += 1
+                    continue
+                decoded += 1
+                yield record
+
+    yielded = 0
+    try:
+        for record in _decode(skip_n=0):
+            yielded += 1
+            yield record
+        return
+    except _CORRUPT_GZIP_ERRORS as exc:
+        log.warning(
+            "Corrupt gzip file: %s (%s: %s) after %d records — attempting redownload",
+            path.name, type(exc).__name__, exc, yielded,
+        )
+
+    try:
+        _redownload_corrupt(path)
+    except FileNotFoundError:
         try:
-            _redownload_corrupt(path)
-            with opener(path, "rb") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            yield _json_loads(line)
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-        except FileNotFoundError:
-            try:
-                rel = str(path.relative_to(SNAPSHOT_DIR))
-            except ValueError:
-                rel = str(path)
-            _skipped_missing_files.append(rel)
-            log.warning("Skipping missing file: %s (total skipped: %d)", path.name, len(_skipped_missing_files))
+            rel = str(path.relative_to(SNAPSHOT_DIR))
+        except ValueError:
+            rel = str(path)
+        _skipped_missing_files.append(rel)
+        log.warning("Skipping missing file: %s (total skipped: %d)", path.name, len(_skipped_missing_files))
+        return
+
+    try:
+        for record in _decode(skip_n=yielded):
+            yield record
+    except _CORRUPT_GZIP_ERRORS as exc:
+        try:
+            rel = str(path.relative_to(SNAPSHOT_DIR))
+        except ValueError:
+            rel = str(path)
+        _corrupt_files.append(rel)
+        log.error(
+            "Still corrupt after redownload: %s (%s: %s)",
+            path, type(exc).__name__, exc,
+        )
+        raise
 
 
 def get_skipped_missing_files() -> list[str]:
     return list(_skipped_missing_files)
 
 
+def get_corrupt_files() -> list[str]:
+    return list(_corrupt_files)
+
+
 def reset_skipped_files() -> None:
     _skipped_missing_files.clear()
+    _corrupt_files.clear()
 
 
 def create_output_dir(path: Path) -> Path:
