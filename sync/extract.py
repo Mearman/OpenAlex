@@ -228,6 +228,55 @@ def _completed_source_keys(output_dir: Path) -> set[str]:
     }
 
 
+def validate_shard(path: Path) -> bool:
+    """Return True iff the parquet shard at *path* is readable.
+
+    Opens the file with ``pyarrow.parquet.ParquetFile`` and accesses its
+    ``.metadata`` (which reads and parses the footer). Any exception —
+    truncation, corrupt footer, unreadable file — returns False.
+
+    A zero-row shard with a valid footer returns True: empty shards are
+    written deliberately as completion markers for source files that
+    produce no rows for a given relationship, so a valid empty footer is
+    not a failure.
+    """
+    try:
+        pf = pq.ParquetFile(str(path))
+        # Accessing metadata forces the footer to be read and parsed.
+        _ = pf.metadata
+        return True
+    except Exception:
+        return False
+
+
+def _completed_source_keys_verified(output_dir: Path) -> set[str]:
+    """Return source keys with a *readable* parquet shard on disk.
+
+    Verify-aware variant of ``_completed_source_keys``: every ``*.parquet``
+    shard is opened and its footer validated via ``validate_shard``. Any
+    shard that fails validation is deleted (logged at warning level) so
+    that it is treated as pending and re-extracted on this run.
+
+    This is the slow path — it opens every shard. ``_completed_source_keys``
+    remains the fast, filename-only default for verify=False.
+    """
+    if not output_dir.exists():
+        return set()
+    completed: set[str] = set()
+    for shard in output_dir.glob("*.parquet"):
+        if shard.name.startswith("._"):
+            continue
+        if validate_shard(shard):
+            completed.add(shard.stem)
+        else:
+            log.warning(
+                "Unreadable parquet shard %s — deleting so it re-extracts",
+                shard,
+            )
+            shard.unlink()
+    return completed
+
+
 def _hf_completed_source_keys(
     entity: str,
     repo_id: str | None = None,
@@ -372,13 +421,37 @@ def _finalise_type(
     relationship_type: str,
     source_entity: str,
     source_file_count: int,
+    verify: bool = False,
 ) -> int:
     """Finalise a relationship type after all units are processed.
 
     Scans parquet shards on disk, computes totals, writes aggregate
     ``_provenance.json``, ``_lineage.json``, and
     ``_manifest_snapshot.json``.  Returns the total row count.
+
+    When *verify* is True, every shard's footer is validated before the
+    type is finalised. A shard that is still unreadable after the run has
+    had its chance to re-extract it is a genuine failure: it is logged
+    with full context, counted, and a ``RuntimeError`` is raised so the
+    run fails loudly rather than recording corrupt output as complete.
     """
+    if verify:
+        unreadable = [
+            shard
+            for shard in sorted(rt_dir.glob("*.parquet"))
+            if not shard.name.startswith("._") and not validate_shard(shard)
+        ]
+        if unreadable:
+            for shard in unreadable:
+                log.error(
+                    "%s: shard %s still unreadable after re-extraction",
+                    relationship_type, shard,
+                )
+            raise RuntimeError(
+                f"{relationship_type}: {len(unreadable)} shard(s) remain "
+                f"unreadable in {rt_dir} after verify re-extraction"
+            )
+
     total_rows, shard_count = _count_shard_rows(rt_dir)
 
     _write_provenance(
@@ -710,7 +783,7 @@ class _SourceFileWriter:
 
 
 def _worker_process_files(
-    args: tuple[int, list[Path], str, list[str], int, Path],
+    args: tuple[int, list[Path], str, list[str], int, dict[str, set[str]], Path],
 ) -> dict:
     """Process a list of source files in one worker process.
 
@@ -794,6 +867,7 @@ def convert_relationships(
     slice_index: int | None = None,
     slice_total: int | None = None,
     output_dir: Path | None = None,
+    verify: bool = False,
 ) -> dict[str, int]:
     """Convert nested JSONL arrays to relationship Parquet tables.
 
@@ -822,11 +896,23 @@ def convert_relationships(
         output_dir: Directory to write parquet output to. Defaults to
             ``SNAPSHOT_DIR`` so that ``rt_dir(output_dir, rt)`` resolves
             to the same path as ``rt_dir(SNAPSHOT_DIR, rt)``.
+        verify: If True, validate every candidate completed shard's parquet
+            footer (via ``validate_shard``) before treating it as complete.
+            Unreadable shards are deleted so they re-extract. When False
+            (default), completion is decided by filename only — the fast
+            path that does not open any shard.
 
     Returns:
         Mapping of relationship type name to number of rows written.
     """
     _output_dir = output_dir if output_dir is not None else SNAPSHOT_DIR
+
+    # Select the completion-check strategy once. verify=True opens and
+    # validates every shard footer (slow); verify=False uses the
+    # filename-only fast path.
+    completed_source_keys = (
+        _completed_source_keys_verified if verify else _completed_source_keys
+    )
 
     all_rel_types = _entity_rel_types(entity_type)
 
@@ -880,7 +966,7 @@ def convert_relationships(
         _rt_dir = rt_dir(_output_dir, rt)
 
         # Check which source files have valid parquet shards on disk
-        all_completed_keys = _completed_source_keys(_rt_dir)
+        all_completed_keys = completed_source_keys(_rt_dir)
 
         # When running with --slice-index, source_files is a subset of
         # the full set.  Only count completed shards that belong to this
@@ -987,7 +1073,7 @@ def convert_relationships(
         _rt_dir = rt_dir(_output_dir, rt)
         create_output_dir(_rt_dir)
 
-        local_completed = _completed_source_keys(_rt_dir)
+        local_completed = completed_source_keys(_rt_dir)
         completed = local_completed | hf_completed.get(rt, set())
         pending = _compute_pending_source_files(source_files, completed)
 
@@ -998,6 +1084,7 @@ def convert_relationships(
                 relationship_type=rt,
                 source_entity=entity_type,
                 source_file_count=len(source_files),
+                verify=verify,
             )
             result[rt] = total
             types_already_done.append(rt)
@@ -1079,6 +1166,7 @@ def convert_relationships(
             relationship_type=rt,
             source_entity=entity_type,
             source_file_count=len(source_files),
+            verify=verify,
         )
         result[rt] = total_row_count
 
@@ -1189,11 +1277,11 @@ def migrate_relationship_type(
     if not legacy_shards:
         log.info("%s: no legacy worker shards found, already in unit layout", relationship_type)
         # Still check if we need to finalise
-        units = _load_unit_provenances(rt_dir)
+        units = _load_unit_provenances(_rt_dir)
         source_files = iter_source_files(entity_type)
         if units and len(units) == len(source_files):
             _finalise_type(
-                rt_dir,
+                _rt_dir,
                 relationship_type=relationship_type,
                 source_entity=entity_type,
                 source_file_count=len(source_files),
@@ -1228,12 +1316,12 @@ def migrate_relationship_type(
         source_key = _source_file_key(source_file)
 
         # Check existing unit provenance
-        existing_units = _load_unit_provenances(rt_dir)
+        existing_units = _load_unit_provenances(_rt_dir)
         existing = existing_units.get(source_key)
 
         if existing and existing.get("status") in ("complete", "empty") and not force:
             # Validate existing unit
-            if _validate_unit(rt_dir, source_key, existing.get("row_count", 0),
+            if _validate_unit(_rt_dir, source_key, existing.get("row_count", 0),
                               existing.get("output_hash")):
                 validated += 1
                 continue
@@ -1266,10 +1354,10 @@ def migrate_relationship_type(
             continue
 
     # Validate all units
-    units = _load_unit_provenances(rt_dir)
+    units = _load_unit_provenances(_rt_dir)
     valid_count = 0
     for key, unit in units.items():
-        if _validate_unit(rt_dir, key, unit.get("row_count", 0), unit.get("output_hash")):
+        if _validate_unit(_rt_dir, key, unit.get("row_count", 0), unit.get("output_hash")):
             valid_count += 1
         else:
             log.warning("%s: unit %s failed post-extraction validation", relationship_type, key)
@@ -1300,15 +1388,15 @@ def migrate_relationship_type(
 
         # Delete old provenance formats
         for stale in ["_provenance.json", "_lineage.json", "_manifest_snapshot.json"]:
-            p = rt_dir / stale
+            p = _rt_dir / stale
             if p.exists():
                 p.unlink()
-        for wp in sorted(rt_dir.glob("_provenance_worker_*.json")):
+        for wp in sorted(_rt_dir.glob("_provenance_worker_*.json")):
             wp.unlink()
 
         # Write new aggregate provenance
         _finalise_type(
-            rt_dir,
+            _rt_dir,
             relationship_type=relationship_type,
             source_entity=entity_type,
             source_file_count=len(source_files),
@@ -1389,7 +1477,7 @@ def _sync_provenance_from_remote(remote_spec: str) -> None:
         log.info("Provenance sync complete")
 
 
-def main(entity: str | None = None, force: bool = False, workers: int | None = None, batch_size: int | None = None, slice_index: int | None = None, slice_total: int | None = None, sync_provenance: str | None = None, output_dir: str | None = None) -> None:
+def main(entity: str | None = None, force: bool = False, workers: int | None = None, batch_size: int | None = None, slice_index: int | None = None, slice_total: int | None = None, sync_provenance: str | None = None, output_dir: str | None = None, verify: bool = False) -> None:
     """Extract relationship tables from JSONL snapshot."""
     import sync.common as _common
 
@@ -1406,7 +1494,7 @@ def main(entity: str | None = None, force: bool = False, workers: int | None = N
     from sync.schema import _discover_entities
     types = [entity] if entity else _discover_entities(SNAPSHOT_DIR)
     for et in types:
-        counts = convert_relationships(et, force=force, workers=workers, batch_size=batch_size, slice_index=slice_index, slice_total=slice_total)
+        counts = convert_relationships(et, force=force, workers=workers, batch_size=batch_size, slice_index=slice_index, slice_total=slice_total, verify=verify)
         for rt, cnt in sorted(counts.items()):
             log.info("Extracted %s: %d rows", rt, cnt)
 
