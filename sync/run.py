@@ -7,7 +7,8 @@ Usage:
     python -m sync upload [--batch-size N] [--max-retries N] [--repo-id REPO]
     python -m sync commit [--message MSG]
     python -m sync push
-    python -m sync full [--entity ENTITY] [--workers N]
+    python -m sync verify [--entity ENTITY] [--workers N]
+    python -m sync full [--entity ENTITY] [--workers N] [--verify]
 
 All commands run from the repo root (parent of openalex-snapshot/).
 """
@@ -192,10 +193,41 @@ def cmd_upload(args) -> None:
     log("ALL DONE")
 
 
+def cmd_verify(args) -> None:
+    """Deep self-heal: content-verify sources and parquet shards, re-fetching corruption.
+
+    Re-downloads sources that fail gzip decompression (content-verified, not
+    size-only) and prunes stale ones, then re-extracts parquet shards that no
+    longer open cleanly. Corruption that survives both passes fails loudly
+    inside the called modules rather than being silently dropped.
+    """
+    from sync.download import run_sync
+    from sync.extract import main as extract_main
+
+    log("=== VERIFY START: deep self-heal (content-verified sources + parquet) ===")
+    run_sync(
+        dest=REPO_ROOT,
+        entity=args.entity,
+        workers=args.workers or 8,
+        dry_run=False,
+        delete=True,
+        verify_content=True,
+    )
+    extract_main(
+        entity=args.entity,
+        force=False,
+        workers=args.workers,
+        verify=True,
+    )
+    log("=== VERIFY END: deep self-heal complete ===")
+
+
 def cmd_full(args) -> None:
-    """Full pipeline: sync → extract → commit → push."""
+    """Full pipeline: sync → extract → [verify] → commit → push."""
     cmd_sync(args)
     cmd_extract(args)
+    if args.verify:
+        cmd_verify(args)
     cmd_commit(args)
     cmd_push(args)
 
@@ -250,10 +282,29 @@ def main():
     p_upload.add_argument("--workers", type=int, default=8, help="Parallel upload workers (default: 8)")
     p_upload.add_argument("--repo-id", type=str, default="Mearman/OpenAlex", help="HF dataset repo ID")
 
+    # verify
+    p_verify = subparsers.add_parser(
+        "verify", help="Deep self-heal: content-verify sources + parquet shards"
+    )
+    p_verify.add_argument("--entity", type=str, default=None)
+    p_verify.add_argument("--workers", type=int, default=None)
+
     # full
-    p_full = subparsers.add_parser("full", help="sync → extract → commit → push")
+    p_full = subparsers.add_parser("full", help="sync → extract → [verify] → commit → push")
     p_full.add_argument("--entity", type=str, default=None)
     p_full.add_argument("--workers", type=int, default=None)
+    p_full.add_argument(
+        "--verify", action="store_true",
+        help="Deep self-heal between extract and commit (content-verify sources + parquet).",
+    )
+    # cmd_full delegates to cmd_sync and cmd_extract, which read these flags;
+    # declare them here (with the same defaults as the standalone subcommands)
+    # so the shared args namespace is complete.
+    p_full.add_argument("--dry-run", action="store_true")
+    p_full.add_argument("--no-delete", action="store_true")
+    p_full.add_argument("--force", action="store_true")
+    p_full.add_argument("--slice-index", type=int, default=None)
+    p_full.add_argument("--slice-total", type=int, default=None)
 
     args = parser.parse_args()
 
@@ -263,6 +314,7 @@ def main():
         "commit": cmd_commit,
         "push": cmd_push,
         "upload": cmd_upload,
+        "verify": cmd_verify,
         "full": cmd_full,
     }
     handlers[args.command](args)
