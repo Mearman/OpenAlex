@@ -710,7 +710,10 @@ class _SourceFileWriter:
         per-row dict key resolution.
         """
         if self.schema is None:
-            raw = pa.Table.from_pylist(rows)
+            try:
+                raw = pa.Table.from_pylist(rows)
+            except (pa.ArrowTypeError, pa.ArrowInvalid, pa.ArrowNotImplementedError) as exc:
+                raise RuntimeError(self._type_error_detail(rows, exc)) from exc
             fields = []
             for f in raw.schema:
                 if f.type in (pa.int32(), pa.int16(), pa.uint8()):
@@ -723,9 +726,32 @@ class _SourceFileWriter:
             return raw.cast(self.schema)
 
         # Known schema — build column-at-a-time for better throughput
-        return pa.Table.from_pydict(
-            {name: [row.get(name) for row in rows] for name in self.schema.names},
-            schema=self.schema,
+        try:
+            return pa.Table.from_pydict(
+                {name: [row.get(name) for row in rows] for name in self.schema.names},
+                schema=self.schema,
+            )
+        except (pa.ArrowTypeError, pa.ArrowInvalid, pa.ArrowNotImplementedError) as exc:
+            raise RuntimeError(self._type_error_detail(rows, exc)) from exc
+
+    def _type_error_detail(self, rows: list[dict], exc: Exception) -> str:
+        """Build a diagnostic naming the table, source, and the offending
+        columns (those with more than one value type) with example values, so a
+        type error points straight at the bad data instead of a bare Arrow error.
+        """
+        col_types: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            for key, val in row.items():
+                if val is None:
+                    continue
+                col_types.setdefault(key, {}).setdefault(type(val).__name__, val)
+        mixed = {
+            col: types for col, types in col_types.items() if len(types) > 1
+        }
+        return (
+            f"Arrow type error building shard rel_type={self.rel_type} "
+            f"source={self.source_key} ({len(rows)} rows): {exc}. "
+            f"Mixed-type columns (name → type:example): {mixed or 'none detected'}"
         )
 
     def _ensure_writer(self) -> pq.ParquetWriter:
