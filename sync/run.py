@@ -17,6 +17,7 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -123,6 +124,8 @@ def cmd_push(args) -> None:
 
 # Files deleted per HF commit when pruning obsolete remote parquets.
 _HF_DELETE_CHUNK = 100
+# Seconds between background upload sweeps while extraction is still running.
+_UPLOAD_SWEEP_SECONDS = 300
 
 
 def _sync_git_refs() -> None:
@@ -152,19 +155,20 @@ def cmd_upload(args) -> None:
 
     Pass ``--no-prune`` to upload additively without deleting anything.
     """
-    from huggingface_hub import CommitOperationDelete, HfApi, upload_large_folder
+    _hf_upload_pass(args.repo_id, args.workers or 8)
+    if not args.no_prune:
+        _hf_prune(args.repo_id)
+    # Bring local git refs in line with what the server now has
+    _sync_git_refs()
+    log("ALL DONE")
 
-    repo_id = args.repo_id
-    num_workers = args.workers or 8
-    api = HfApi()
 
-    # Canonical local parquet set (paths relative to the repo root, posix form).
-    local: set[str] = {
-        p.relative_to(SYNC_ROOT).as_posix()
-        for p in SYNC_ROOT.rglob("*.parquet")
-        if not p.name.startswith("._")
-    }
-    log(f"{len(local)} local parquet files; uploading new/changed with {num_workers} workers")
+def _hf_upload_pass(repo_id: str, num_workers: int) -> None:
+    """Upload new and changed parquet files (additive). ``upload_large_folder``
+    hashes each file and uploads only those the server lacks or whose content
+    differs, so re-running is cheap and resumable — safe to call repeatedly
+    while extraction is still producing shards."""
+    from huggingface_hub import upload_large_folder
 
     upload_large_folder(
         repo_id=repo_id,
@@ -175,30 +179,51 @@ def cmd_upload(args) -> None:
         num_workers=num_workers,
     )
 
-    # Prune remote parquets that no longer exist locally so HF mirrors local.
-    if not args.no_prune:
-        remote = [
-            f for f in api.list_repo_files(repo_id, repo_type="dataset")
-            if f.endswith(".parquet")
-        ]
-        obsolete = sorted(set(remote) - local)
-        if obsolete:
-            log(f"Pruning {len(obsolete)} obsolete remote parquet files")
-            for i in range(0, len(obsolete), _HF_DELETE_CHUNK):
-                batch = obsolete[i:i + _HF_DELETE_CHUNK]
-                api.create_commit(
-                    repo_id=repo_id,
-                    repo_type="dataset",
-                    operations=[CommitOperationDelete(path_in_repo=f) for f in batch],
-                    commit_message=f"reconcile: prune {len(batch)} obsolete parquet files",
-                )
-            log(f"Pruned {len(obsolete)} obsolete remote files")
-        else:
-            log("No obsolete remote parquet files to prune")
 
-    # Bring local git refs in line with what the server now has
-    _sync_git_refs()
-    log("ALL DONE")
+def _hf_prune(repo_id: str) -> None:
+    """Delete remote parquet files absent from the local set so HF mirrors
+    local. Destructive — run only once the local extraction is complete."""
+    from huggingface_hub import CommitOperationDelete, HfApi
+
+    api = HfApi()
+    local = {
+        p.relative_to(SYNC_ROOT).as_posix()
+        for p in SYNC_ROOT.rglob("*.parquet")
+        if not p.name.startswith("._")
+    }
+    remote = [
+        f for f in api.list_repo_files(repo_id, repo_type="dataset")
+        if f.endswith(".parquet")
+    ]
+    obsolete = sorted(set(remote) - local)
+    if not obsolete:
+        log("No obsolete remote parquet files to prune")
+        return
+    log(f"Pruning {len(obsolete)} obsolete remote parquet files")
+    for i in range(0, len(obsolete), _HF_DELETE_CHUNK):
+        batch = obsolete[i:i + _HF_DELETE_CHUNK]
+        api.create_commit(
+            repo_id=repo_id,
+            repo_type="dataset",
+            operations=[CommitOperationDelete(path_in_repo=f) for f in batch],
+            commit_message=f"reconcile: prune {len(batch)} obsolete parquet files",
+        )
+    log(f"Pruned {len(obsolete)} obsolete remote files")
+
+
+def _background_uploader(repo_id: str, num_workers: int, stop: threading.Event) -> None:
+    """Repeatedly upload completed parquet shards (additive only) until
+    signalled, so the HF upload overlaps the long extraction instead of running
+    as a serial tail. Pruning and git-ref sync are deliberately excluded — they
+    run once at the end against the final local set. A failed sweep (e.g. an HF
+    rate limit) is logged and retried on the next pass; it never aborts the run.
+    """
+    while not stop.is_set():
+        try:
+            _hf_upload_pass(repo_id, num_workers)
+        except Exception as exc:  # noqa: BLE001 — a sweep failure must not kill extraction
+            log(f"background upload sweep failed (will retry): {exc}")
+        stop.wait(_UPLOAD_SWEEP_SECONDS)
 
 
 def cmd_verify(args) -> None:
@@ -278,8 +303,33 @@ def main():
 
     log("=== download (S3 → sources) ===")
     cmd_sync(args)
+
+    # Overlap the HF upload with extraction: a background thread uploads
+    # completed shards (additive only) while extraction runs, so the upload
+    # hides under the long extract instead of being a serial tail. Pruning and
+    # git-ref sync run once at the end, against the final local set.
+    stop_upload: threading.Event | None = None
+    uploader: threading.Thread | None = None
+    if not args.no_upload:
+        stop_upload = threading.Event()
+        uploader = threading.Thread(
+            target=_background_uploader,
+            args=(args.repo_id, args.workers or 8, stop_upload),
+            name="hf-uploader",
+            daemon=True,
+        )
+        uploader.start()
+        log("=== background HF upload started (overlapping extraction) ===")
+
     log("=== extract (sources → Parquet) ===")
     cmd_extract(args)
+
+    # Stop overlapping uploads before the git stages and the final reconcile so
+    # nothing races on git refs or runs two upload_large_folder passes at once.
+    if uploader is not None and stop_upload is not None:
+        stop_upload.set()
+        uploader.join()
+
     if args.verify:
         log("=== verify (deep self-heal) ===")
         cmd_verify(args)
@@ -288,7 +338,7 @@ def main():
     log("=== push ===")
     cmd_push(args)
     if not args.no_upload:
-        log("=== upload (reconcile HuggingFace) ===")
+        log("=== upload (final reconcile: catch-up + prune HuggingFace) ===")
         cmd_upload(args)
     log("=== sync complete ===")
 

@@ -49,7 +49,7 @@ python3 -m sync --slice-index 1 --slice-total 2   # machine 2
 
 Source files are saved as `part_XXXX.jsonl.gz` (renamed from S3's `part_XXXX.gz` so HuggingFace's dataset viewer detects the format).
 
-The extractor derives each entity's schema by scanning the source data — there is no hardcoded field list. Scalar attributes (id, doi, title, language, publication year, type, FWCI, open-access and bibliographic metadata, …) are collected into a single **main** table per entity; every list- or dict-valued field becomes its own **relationship** table. Each source shard produces one Parquet file per table. The HuggingFace reconcile uploads new and changed Parquet files and prunes any that no longer exist locally (`--no-prune` to upload additively).
+The extractor derives each entity's schema by scanning the source data — there is no hardcoded field list. Scalar attributes (id, doi, title, language, publication year, type, FWCI, open-access and bibliographic metadata, …) are collected into a single **main** table per entity; every list- or dict-valued field becomes its own **relationship** table. Each source shard produces one Parquet file per table. The HuggingFace upload runs **in the background, overlapping extraction** — completed shards are pushed while later ones are still being written, so it adds little to the wall-clock rather than running as a serial tail. The prune (deleting remote Parquet files that no longer exist locally) and the git-ref sync run once at the end against the final set (`--no-prune` to upload additively, `--no-upload` to skip HuggingFace entirely).
 
 ### Entity layout
 
