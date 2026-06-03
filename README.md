@@ -39,9 +39,9 @@ python3 -m sync download --entity works
 
 Files are saved as `part_XXXX.jsonl.gz` (renamed from S3's `part_XXXX.gz` so HuggingFace's dataset viewer detects the format).
 
-### Extract relationship tables to Parquet
+### Extract Parquet tables
 
-Each source shard produces one Parquet file per relationship type (e.g. `work_abstracts`, `author_institutions`):
+The extractor derives each entity's schema by scanning the source data — there is no hardcoded field list. Scalar attributes (id, doi, title, language, publication year, type, FWCI, open-access and bibliographic metadata, …) are collected into a single **main** table per entity; every list- or dict-valued field becomes its own **relationship** table. Each source shard produces one Parquet file per table:
 
 ```bash
 # Extract everything (skips already-completed shards)
@@ -69,19 +69,21 @@ python3 -m sync upload --batch-size 100
 
 ```
 data/{entity}/
-  updated_date=YYYY-MM-DD/part_XXXX.jsonl.gz      # source data (from S3)
+  updated_date=YYYY-MM-DD/part_XXXX.jsonl.gz       # source data (from S3)
+  main/
+    {entity}__updated_date=...__part_XXXX.parquet   # scalar attributes, one row per entity
   {relationship_type}/
-    {entity}__updated_date=...__part_XXXX.parquet  # extracted tables
+    {entity}__updated_date=...__part_XXXX.parquet   # one edge table per list/dict field
 ```
 
-For example, works produces relationship tables for abstracts, authorships, references, concepts, keywords, locations, and more.
+The schema is data-derived and committed to `openalex.schema.json`; re-scanning the data reproduces it deterministically, so a field's presence in the schema is decided by the data, not a hardcoded list. For example, works yields a `main` table (doi, title, language, year, type, FWCI, …) alongside relationship tables for abstracts, authorships, references, concepts, keywords, locations, and more.
 
 ## Dataset
 
 | | |
 |---|---|
 | **Host** | https://huggingface.co/datasets/Mearman/OpenAlex |
-| **Format** | JSONL source (`.jsonl.gz`) + Parquet relationship tables |
+| **Format** | JSONL source (`.jsonl.gz`) + Parquet tables (a `main` scalar-attribute table and relationship tables per entity) |
 | **License** | CC0 (public domain) |
 
 ### Entities
