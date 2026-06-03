@@ -140,7 +140,7 @@ def _sync_git_refs() -> None:
     log("Git refs synced")
 
 
-def cmd_upload(args) -> None:
+def cmd_upload(args, *, workers: int | None = None) -> None:
     """Reconcile the HuggingFace dataset's parquet files with the local set.
 
     Makes the remote mirror the canonical local extraction exactly:
@@ -154,8 +154,10 @@ def cmd_upload(args) -> None:
          from a previous (buggy) extraction don't linger on the dataset.
 
     Pass ``--no-prune`` to upload additively without deleting anything.
+    ``workers`` overrides the parallel-upload count (e.g. the resource governor
+    grants the final pass the whole machine once extraction has finished).
     """
-    _hf_upload_pass(args.repo_id, args.workers or 8)
+    _hf_upload_pass(args.repo_id, workers or args.workers or 8)
     if not args.no_prune:
         _hf_prune(args.repo_id)
     # Bring local git refs in line with what the server now has
@@ -301,6 +303,34 @@ def main():
 
     _validate_slice(args.slice_index, args.slice_total)
 
+    # ── Resource governor ────────────────────────────────────────────────
+    # Detect CPU/RAM once and split worker budgets across the concurrent
+    # stages so they never oversubscribe the machine. Extraction is CPU+RAM
+    # bound; the overlapping upload is network-bound and needs only a few
+    # cores, so it gets a small slice during overlap and the whole machine for
+    # the final solo pass. An explicit --workers overrides the extraction count
+    # (the upload slice then fills whatever cores that leaves).
+    from sync.extract import _auto_workers
+
+    cpu = os.cpu_count() or 4
+    if args.no_upload:
+        upload_overlap = 0
+        upload_solo = 0
+    else:
+        upload_overlap = max(2, cpu // 4)  # network-bound: a few cores suffice
+        upload_solo = cpu                  # whole machine once extraction ends
+    if args.workers:
+        extract_workers = args.workers
+        if not args.no_upload:
+            upload_overlap = max(2, cpu - args.workers)
+    else:
+        extract_workers = _auto_workers(reserve=upload_overlap)
+    args.workers = extract_workers  # extraction reads args.workers
+    log(
+        f"resource plan: {cpu} CPUs -> extract={extract_workers}, "
+        f"upload(overlap)={upload_overlap}, upload(final)={upload_solo}"
+    )
+
     log("=== download (S3 → sources) ===")
     cmd_sync(args)
 
@@ -314,12 +344,12 @@ def main():
         stop_upload = threading.Event()
         uploader = threading.Thread(
             target=_background_uploader,
-            args=(args.repo_id, args.workers or 8, stop_upload),
+            args=(args.repo_id, upload_overlap, stop_upload),
             name="hf-uploader",
             daemon=True,
         )
         uploader.start()
-        log("=== background HF upload started (overlapping extraction) ===")
+        log(f"=== background HF upload started ({upload_overlap} workers, overlapping extraction) ===")
 
     log("=== extract (sources → Parquet) ===")
     cmd_extract(args)
@@ -338,8 +368,8 @@ def main():
     log("=== push ===")
     cmd_push(args)
     if not args.no_upload:
-        log("=== upload (final reconcile: catch-up + prune HuggingFace) ===")
-        cmd_upload(args)
+        log(f"=== upload (final reconcile: catch-up + prune, {upload_solo} workers) ===")
+        cmd_upload(args, workers=upload_solo)
     log("=== sync complete ===")
 
 

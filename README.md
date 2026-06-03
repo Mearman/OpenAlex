@@ -51,6 +51,8 @@ Source files are saved as `part_XXXX.jsonl.gz` (renamed from S3's `part_XXXX.gz`
 
 The extractor derives each entity's schema by scanning the source data — there is no hardcoded field list. Scalar attributes (id, doi, title, language, publication year, type, FWCI, open-access and bibliographic metadata, …) are collected into a single **main** table per entity; every list- or dict-valued field becomes its own **relationship** table. Each source shard produces one Parquet file per table. The HuggingFace upload runs **in the background, overlapping extraction** — completed shards are pushed while later ones are still being written, so it adds little to the wall-clock rather than running as a serial tail. The prune (deleting remote Parquet files that no longer exist locally) and the git-ref sync run once at the end against the final set (`--no-prune` to upload additively, `--no-upload` to skip HuggingFace entirely).
 
+A **resource governor** detects CPU and RAM at startup and splits worker budgets across the concurrent stages so they don't oversubscribe the machine: extraction (CPU + RAM bound) is sized from available RAM and cores while reserving a small slice for the overlapping upload (network bound, so a few cores suffice), and the final upload pass — once extraction is done — gets the whole machine. `--workers N` overrides the extraction count and the upload fills the remaining cores.
+
 ### Entity layout
 
 ```

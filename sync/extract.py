@@ -59,35 +59,40 @@ _RAM_HEADROOM_GB = 2
 _RAM_PER_WORKER_GB = 6
 
 
-def _auto_workers() -> int:
-    """Pick a worker count that fits available CPU and RAM.
+def _auto_workers(reserve: int = 0) -> int:
+    """Pick an extraction worker count that fits available CPU and RAM.
 
     Uses ``sysconf`` to read total physical memory on Unix (Linux, macOS).
     Falls back to ``_DEFAULT_WORKERS`` capped by the CPU count when
     ``sysconf`` is not available (e.g. Windows).
 
+    ``reserve`` withholds that many CPUs from the count so a concurrent stage
+    (e.g. a background upload running alongside extraction) has cores to use
+    without oversubscribing the machine. RAM remains the other cap.
+
     The chosen count is logged so the caller can audit the decision.
     """
     cpu_count = os.cpu_count() or 1
+    usable_cpu = max(1, cpu_count - max(0, reserve))
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
         phys_pages = os.sysconf("SC_PHYS_PAGES")
         total_bytes = page_size * phys_pages
     except (AttributeError, ValueError, OSError):
         # Non-Unix or sysconf names unavailable — fall back to CPU-bounded default.
-        chosen = max(1, min(cpu_count, _DEFAULT_WORKERS))
+        chosen = max(1, min(usable_cpu, _DEFAULT_WORKERS))
         log.info(
-            "Auto-sized workers to %d (RAM detection unavailable, %d CPUs)",
-            chosen, cpu_count,
+            "Auto-sized workers to %d (RAM detection unavailable, %d CPUs, %d reserved)",
+            chosen, cpu_count, reserve,
         )
         return chosen
 
     total_gb = total_bytes / (1024 ** 3)
     by_ram = max(1, int((total_gb - _RAM_HEADROOM_GB) // _RAM_PER_WORKER_GB))
-    chosen = max(1, min(cpu_count, by_ram))
+    chosen = max(1, min(usable_cpu, by_ram))
     log.info(
-        "Auto-sized workers to %d (%.0fGB RAM, %d CPUs)",
-        chosen, total_gb, cpu_count,
+        "Auto-sized workers to %d (%.0fGB RAM, %d CPUs, %d reserved, RAM cap %d)",
+        chosen, total_gb, cpu_count, reserve, by_ram,
     )
     return chosen
 
