@@ -376,7 +376,7 @@ def _pattern_id_ref(
     id_path = fs.id_path or "id"
     rows: list[dict] = []
     for item in items:
-        target_id = extract_id(_resolve_nested(item, id_path))
+        target_id = _derive_entity_id(item, id_path)
         if target_id is None:
             continue
         row: dict[str, Any] = {entity_id_col: entity_id}
@@ -422,7 +422,7 @@ def _pattern_nested_id_ref(
     parent_rows: list[dict] = []
 
     for item in items:
-        target_id = extract_id(_resolve_nested(item, id_path))
+        target_id = _derive_entity_id(item, id_path)
         if target_id is None:
             continue
         row: dict[str, Any] = {entity_id_col: entity_id}
