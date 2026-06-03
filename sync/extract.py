@@ -1531,6 +1531,13 @@ def main(entity: str | None = None, force: bool = False, workers: int | None = N
 
     from sync.schema import _discover_entities
     types = [entity] if entity else _discover_entities(SNAPSHOT_DIR)
+    if entity is None and len(types) > 1:
+        # Process smallest entity first (by source partition count) so a bug
+        # surfaces on a cheap entity within seconds rather than only after the
+        # largest one finishes; the big poles (authors, works) run last. Order
+        # does not affect correctness — each entity extracts independently.
+        types = sorted(types, key=lambda et: len(iter_source_files(et)))
+        log.info("Entity order (smallest-first): %s", ", ".join(types))
     for et in types:
         counts = convert_relationships(et, force=force, workers=workers, batch_size=batch_size, slice_index=slice_index, slice_total=slice_total, verify=verify)
         for rt, cnt in sorted(counts.items()):
