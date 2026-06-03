@@ -118,6 +118,22 @@ def _coerce_scalar(value: Any, typ: str) -> Any:
     return str(value)
 
 
+def _derive_entity_id(record: dict, id_path: str) -> int | str | None:
+    """Resolve an entity's own id from its record.
+
+    Numeric OpenAlex ids (e.g. W123 → 123) extract to int; ids with no numeric
+    suffix fall back to the final URL path segment as a string (slug entities
+    like keywords, languages). A numeric slug therefore yields int while a
+    textual one yields str — the caller widens/coerces to keep a column's type
+    homogeneous (see EntitySchema.id_type).
+    """
+    raw = _resolve_nested(record, id_path)
+    eid: int | str | None = extract_id(raw)
+    if eid is None and isinstance(raw, str) and raw:
+        eid = raw.rsplit("/", 1)[-1]
+    return eid
+
+
 # ── Schema types ────────────────────────────────────────────────────────
 
 
@@ -205,18 +221,25 @@ class EntitySchema:
         id_col: Column name for the entity ID (e.g. "work_id")
         id_path: Dot-path to the entity's own ID in the record (e.g. "id")
         fields: Schemas for extractable fields
+        id_type: Widened type of the entity id ("int" or "str"), derived from
+            data. Numeric-id entities (works W…, authors A…) are "int"; slug-id
+            entities (keywords, languages) are "str". A few entities mix the two
+            (a numeric slug yields int, others str) — widening to "str" keeps the
+            id column homogeneous across every table that carries it.
     """
 
     entity: str
     id_col: str
     id_path: str
     fields: list[FieldSchema] = field(default_factory=list)
+    id_type: str = "str"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "entity": self.entity,
             "id_col": self.id_col,
             "id_path": self.id_path,
+            "id_type": self.id_type,
             "fields": [f.to_dict() for f in self.fields],
         }
 
@@ -226,6 +249,7 @@ class EntitySchema:
             entity=d["entity"],
             id_col=d["id_col"],
             id_path=d.get("id_path", "id"),
+            id_type=d.get("id_type", "str"),
             fields=[FieldSchema.from_dict(f) for f in d.get("fields", [])],
         )
 
@@ -843,14 +867,13 @@ def extract_relationships(
     Returns {rel_name: [row_dict, ...]} for each relationship type
     that has data in this record.
     """
-    entity_id: int | str | None = extract_id(_resolve_nested(record, schema.id_path))
+    entity_id = _derive_entity_id(record, schema.id_path)
     if entity_id is None:
-        # Non-numeric IDs (continents, countries, subfields) — use string tail
-        raw_id = _resolve_nested(record, schema.id_path)
-        if isinstance(raw_id, str) and raw_id:
-            entity_id = raw_id.rsplit("/", 1)[-1]
-        if entity_id is None:
-            return {}
+        return {}
+    # Coerce to the entity's widened id type so every table carrying this id
+    # (main and all relationship tables) has a homogeneous id column — a numeric
+    # slug (int) and a textual one (str) must not coexist in one column.
+    entity_id = _coerce_scalar(entity_id, schema.id_type)
 
     result: dict[str, list[dict]] = {}
 
@@ -1413,11 +1436,23 @@ def probe_schema_multi(
     seed_fields = seed_schema.fields if seed_schema is not None else None
     fields = _merge_field_schemas(observed_fields, seed_fields)
 
+    # Widen the entity id type across all sampled records (a slug entity whose
+    # ids are mostly textual but occasionally all-digits must be typed "str").
+    id_types: set[str] = set()
+    for record in records:
+        eid = _derive_entity_id(record, id_path)
+        if eid is not None:
+            id_types.add(_py_type_name(eid))
+    schema_id_type = _widen_scalar_type(id_types)
+    if seed_schema is not None and seed_schema.id_type == "str":
+        schema_id_type = "str"
+
     schema = EntitySchema(
         entity=entity,
         id_col=id_col,
         id_path=id_path,
         fields=fields,
+        id_type=schema_id_type,
     )
     log.info(
         "Probed schema for %s (multi): %d fields, %d relationship types",
