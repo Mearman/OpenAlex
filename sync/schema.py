@@ -861,11 +861,18 @@ _PATTERN_DISPATCH: dict[str, Any] = {
 def extract_relationships(
     record: dict,
     schema: EntitySchema,
+    wanted: frozenset[str] | None = None,
 ) -> dict[str, list[dict]]:
     """Extract all relationship rows from a single record using its schema.
 
     Returns {rel_name: [row_dict, ...]} for each relationship type
     that has data in this record.
+
+    ``wanted`` restricts extraction to a set of rel_names — fields whose output
+    (including nested rel_names) is not wanted are skipped without being
+    computed. On the resume path, where most relationship tables are already
+    complete, this avoids the expensive extraction of rows that would be
+    discarded. Output for the wanted tables is identical to a full extraction.
     """
     entity_id = _derive_entity_id(record, schema.id_path)
     if entity_id is None:
@@ -875,15 +882,25 @@ def extract_relationships(
     # slug (int) and a textual one (str) must not coexist in one column.
     entity_id = _coerce_scalar(entity_id, schema.id_type)
 
+    main_rel = f"{_singular(schema.entity)}_main"
+    want_main = wanted is None or main_rel in wanted
+
     result: dict[str, list[dict]] = {}
 
     for fs in schema.fields:
-        value = record.get(fs.json_key)
-
         # Scalar fields are collected into the main entity table below, not
         # dispatched as relationships.
         if fs.pattern == "scalar":
             continue
+
+        # Skip fields whose output table isn't wanted (resume fast path).
+        if wanted is not None:
+            field_rels = {fs.rel_name}
+            field_rels.update(n.rel_name for n in fs.nested)
+            if not (field_rels & wanted):
+                continue
+
+        value = record.get(fs.json_key)
 
         # Handle None / empty
         if value is None:
@@ -925,19 +942,20 @@ def extract_relationships(
     # ── Main entity table: one row per record holding every scalar column ──
     # Columns are fixed by the schema's scalar fields, so each row carries the
     # same keys (missing values resolve to None) and the per-shard parquet has
-    # a stable column set.
-    main_row: dict[str, Any] = {schema.id_col: entity_id}
-    has_scalar = False
-    for fs in schema.fields:
-        if fs.pattern != "scalar":
-            continue
-        has_scalar = True
-        for sc in fs.scalar_cols:
-            main_row[sc["col"]] = _coerce_scalar(
-                _resolve_nested(record, sc["path"]), sc["type"],
-            )
-    if has_scalar:
-        result[f"{_singular(schema.entity)}_main"] = [main_row]
+    # a stable column set. Skipped entirely when the main table isn't wanted.
+    if want_main:
+        main_row: dict[str, Any] = {schema.id_col: entity_id}
+        has_scalar = False
+        for fs in schema.fields:
+            if fs.pattern != "scalar":
+                continue
+            has_scalar = True
+            for sc in fs.scalar_cols:
+                main_row[sc["col"]] = _coerce_scalar(
+                    _resolve_nested(record, sc["path"]), sc["type"],
+                )
+        if has_scalar:
+            result[main_rel] = [main_row]
 
     return result
 

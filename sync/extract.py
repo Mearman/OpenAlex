@@ -640,8 +640,11 @@ def _extract_one_source_file(
     _buffers = buffers
     _writers = writers
 
+    # Only compute the relationship types being written for this file (the
+    # rest are already complete and would be discarded) — avoids the expensive
+    # extraction of completed tables on the resume path.
     for record in iter_jsonl(source_file):
-        rels = _extract_entity_relationships(record, schema)
+        rels = _extract_entity_relationships(record, schema, wanted=rel_types)
         for rt, rows in rels.items():
             buf = _buffers.get(rt)
             if buf is None:
@@ -880,8 +883,10 @@ def _entity_schema(entity: str) -> EntitySchema:
     return get_entity_schema(entity, source_dir=SNAPSHOT_DIR / entity)
 
 
-def _extract_entity_relationships(record: dict, schema: EntitySchema) -> dict[str, list[dict]]:
-    return extract_relationships(record, schema)
+def _extract_entity_relationships(
+    record: dict, schema: EntitySchema, wanted: frozenset[str] | None = None,
+) -> dict[str, list[dict]]:
+    return extract_relationships(record, schema, wanted=wanted)
 
 
 def _entity_rel_types(entity: str) -> frozenset[str]:
