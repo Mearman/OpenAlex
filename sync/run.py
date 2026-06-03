@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Orchestrate OpenAlex snapshot data management.
+"""Sync the OpenAlex snapshot — one idempotent command, no subcommands.
 
-Usage:
-    python -m sync sync [--entity ENTITY] [--workers N]
-    python -m sync extract [--entity ENTITY] [--workers N]
-    python -m sync upload [--batch-size N] [--max-retries N] [--repo-id REPO]
-    python -m sync commit [--message MSG]
-    python -m sync push
-    python -m sync verify [--entity ENTITY] [--workers N]
-    python -m sync full [--entity ENTITY] [--workers N] [--verify]
+    python -m sync [--entity E] [--workers N] [--verify] [--force]
+                   [--no-upload] [--no-prune] [--dry-run] [--no-delete]
+                   [--repo-id REPO] [-m MSG] [--slice-index I --slice-total T]
 
-All commands run from the repo root (parent of openalex-snapshot/).
+Runs the full pipeline end to end: download sources from S3 → extract Parquet
+tables → commit → push → reconcile the HuggingFace dataset (upload new/changed,
+prune obsolete). Every stage is idempotent, so re-running converges the local
+tree, the git remote, and the HF dataset to the canonical state and resumes
+where it left off. Runs from the repo root (parent of openalex-snapshot/).
 """
 from __future__ import annotations
 
@@ -156,6 +155,7 @@ def cmd_upload(args) -> None:
     from huggingface_hub import CommitOperationDelete, HfApi, upload_large_folder
 
     repo_id = args.repo_id
+    num_workers = args.workers or 8
     api = HfApi()
 
     # Canonical local parquet set (paths relative to the repo root, posix form).
@@ -164,7 +164,7 @@ def cmd_upload(args) -> None:
         for p in SYNC_ROOT.rglob("*.parquet")
         if not p.name.startswith("._")
     }
-    log(f"{len(local)} local parquet files; uploading new/changed with {args.workers} workers")
+    log(f"{len(local)} local parquet files; uploading new/changed with {num_workers} workers")
 
     upload_large_folder(
         repo_id=repo_id,
@@ -172,7 +172,7 @@ def cmd_upload(args) -> None:
         repo_type="dataset",
         allow_patterns=["*.parquet"],
         ignore_patterns=["._*"],  # Apple Double files
-        num_workers=args.workers,
+        num_workers=num_workers,
     )
 
     # Prune remote parquets that no longer exist locally so HF mirrors local.
@@ -230,108 +230,67 @@ def cmd_verify(args) -> None:
     log("=== VERIFY END: deep self-heal complete ===")
 
 
-def cmd_full(args) -> None:
-    """Full pipeline: sync → extract → [verify] → commit → push."""
-    cmd_sync(args)
-    cmd_extract(args)
-    if args.verify:
-        cmd_verify(args)
-    cmd_commit(args)
-    cmd_push(args)
-
-
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def main():
+    """Single entrypoint: download from S3 → extract Parquet → commit → push →
+    reconcile HuggingFace. Every stage is idempotent, so ``python -m sync``
+    converges the local tree, the git remote, and the HF dataset to the
+    canonical state; re-running is safe and resumes where it left off.
+    """
     parser = argparse.ArgumentParser(
-        description="OpenAlex snapshot data management",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # sync
-    p_sync = subparsers.add_parser("sync", help="Sync .gz from S3")
-    p_sync.add_argument("--entity", type=str, default=None)
-    p_sync.add_argument("--workers", type=int, default=8)
-    p_sync.add_argument("--dry-run", action="store_true")
-    p_sync.add_argument("--no-delete", action="store_true")
-
-    # extract
-    p_extract = subparsers.add_parser("extract", help="Extract parquet")
-    p_extract.add_argument("--entity", type=str, default=None)
-    p_extract.add_argument(
-        "--workers", type=int, default=None,
-        help="Parallel worker processes. Default: auto-sized from RAM and CPU count.",
-    )
-    p_extract.add_argument(
-        "--slice-index", type=int, default=None,
-        help=(
-            "Process only the slice_index-th of slice_total chunks "
-            "(modulo source-file index). 0-based. Use together with --slice-total "
-            "to split work across machines."
+        prog="sync",
+        description=(
+            "Sync the OpenAlex snapshot: download sources from S3, extract "
+            "Parquet tables, commit/push, and reconcile the HuggingFace dataset. "
+            "Idempotent — re-run to converge."
         ),
     )
-    p_extract.add_argument(
-        "--slice-total", type=int, default=None,
-        help="Total number of slices for distributed processing. Use with --slice-index.",
+    parser.add_argument("--entity", type=str, default=None, help="Limit to one entity (default: all)")
+    parser.add_argument(
+        "--workers", type=int, default=None,
+        help="Extract worker processes (default: auto-sized from RAM/CPU). Download and upload use 8 when unset.",
     )
-    p_extract.add_argument("--force", action="store_true")
-
-    # commit
-    p_commit = subparsers.add_parser("commit", help="Git add + commit")
-    p_commit.add_argument("--message", "-m", type=str, default=None)
-
-    # push
-    subparsers.add_parser("push", help="Git push")
-
-    # upload
-    p_upload = subparsers.add_parser(
-        "upload", help="Reconcile HF parquet files with the local set (upload new/changed, prune obsolete)"
-    )
-    p_upload.add_argument("--workers", type=int, default=8, help="Parallel upload workers (default: 8)")
-    p_upload.add_argument("--repo-id", type=str, default="Mearman/OpenAlex", help="HF dataset repo ID")
-    p_upload.add_argument(
-        "--no-prune", action="store_true",
-        help="Upload additively without deleting remote parquet files absent locally",
-    )
-
-    # verify
-    p_verify = subparsers.add_parser(
-        "verify", help="Deep self-heal: content-verify sources + parquet shards"
-    )
-    p_verify.add_argument("--entity", type=str, default=None)
-    p_verify.add_argument("--workers", type=int, default=None)
-
-    # full
-    p_full = subparsers.add_parser("full", help="sync → extract → [verify] → commit → push")
-    p_full.add_argument("--entity", type=str, default=None)
-    p_full.add_argument("--workers", type=int, default=None)
-    p_full.add_argument(
+    parser.add_argument("--force", action="store_true", help="Re-extract all units regardless of provenance")
+    parser.add_argument(
         "--verify", action="store_true",
-        help="Deep self-heal between extract and commit (content-verify sources + parquet).",
+        help="Deep self-heal: content-verify sources and Parquet shards (re-fetch/re-extract corruption) before commit",
     )
-    # cmd_full delegates to cmd_sync and cmd_extract, which read these flags;
-    # declare them here (with the same defaults as the standalone subcommands)
-    # so the shared args namespace is complete.
-    p_full.add_argument("--dry-run", action="store_true")
-    p_full.add_argument("--no-delete", action="store_true")
-    p_full.add_argument("--force", action="store_true")
-    p_full.add_argument("--slice-index", type=int, default=None)
-    p_full.add_argument("--slice-total", type=int, default=None)
-
+    parser.add_argument("--dry-run", action="store_true", help="Download: report actions without fetching")
+    parser.add_argument("--no-delete", action="store_true", help="Download: keep local files absent from S3")
+    parser.add_argument("--no-prune", action="store_true", help="Upload: do not delete remote Parquet files absent locally")
+    parser.add_argument("--no-upload", action="store_true", help="Skip the HuggingFace upload/reconcile stage")
+    parser.add_argument("--repo-id", type=str, default="Mearman/OpenAlex", help="HuggingFace dataset repo ID")
+    parser.add_argument("--message", "-m", type=str, default=None, help="Commit message")
+    parser.add_argument(
+        "--slice-index", type=int, default=None,
+        help="Process the slice_index-th of slice_total chunks (0-based); with --slice-total splits work across machines",
+    )
+    parser.add_argument(
+        "--slice-total", type=int, default=None,
+        help="Total slices for distributed processing; use with --slice-index",
+    )
     args = parser.parse_args()
 
-    handlers = {
-        "sync": cmd_sync,
-        "extract": cmd_extract,
-        "commit": cmd_commit,
-        "push": cmd_push,
-        "upload": cmd_upload,
-        "verify": cmd_verify,
-        "full": cmd_full,
-    }
-    handlers[args.command](args)
+    _validate_slice(args.slice_index, args.slice_total)
+
+    log("=== download (S3 → sources) ===")
+    cmd_sync(args)
+    log("=== extract (sources → Parquet) ===")
+    cmd_extract(args)
+    if args.verify:
+        log("=== verify (deep self-heal) ===")
+        cmd_verify(args)
+    log("=== commit ===")
+    cmd_commit(args)
+    log("=== push ===")
+    cmd_push(args)
+    if not args.no_upload:
+        log("=== upload (reconcile HuggingFace) ===")
+        cmd_upload(args)
+    log("=== sync complete ===")
 
 
 if __name__ == "__main__":

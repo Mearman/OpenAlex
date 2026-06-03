@@ -11,7 +11,7 @@ Sync/extraction tooling for the OpenAlex scholarly metadata snapshot. The datase
 
 ## Quick Start
 
-All `sync` commands run from this directory (the repo root). The submodule must be initialised so `openalex-snapshot/data/` exists.
+`python3 -m sync` runs from this directory (the repo root). The submodule must be initialised so `openalex-snapshot/data/` exists.
 
 ```bash
 git clone https://github.com/Mearman/OpenAlex.git
@@ -25,45 +25,31 @@ git submodule update --init
 pip install -r sync/requirements.txt
 ```
 
-### Download from S3
+### Run the sync
 
-OpenAlex publishes the snapshot on AWS S3, freely accessible:
-
-```bash
-# Download all entities
-python3 -m sync download
-
-# Download a single entity
-python3 -m sync download --entity works
-```
-
-Files are saved as `part_XXXX.jsonl.gz` (renamed from S3's `part_XXXX.gz` so HuggingFace's dataset viewer detects the format).
-
-### Extract Parquet tables
-
-The extractor derives each entity's schema by scanning the source data — there is no hardcoded field list. Scalar attributes (id, doi, title, language, publication year, type, FWCI, open-access and bibliographic metadata, …) are collected into a single **main** table per entity; every list- or dict-valued field becomes its own **relationship** table. Each source shard produces one Parquet file per table:
+One idempotent command does everything — download sources from S3, extract Parquet, commit/push, and reconcile the HuggingFace dataset. There are no subcommands; re-running converges the local tree, git, and HF to the canonical state and resumes where it left off:
 
 ```bash
-# Extract everything (skips already-completed shards)
-python3 -m sync extract
+# Full sync (all entities)
+python3 -m sync
 
-# Extract a single entity
-python3 -m sync extract --entity works
+# Limit to one entity
+python3 -m sync --entity works
 
-# Distributed across two machines
-python3 -m sync extract --slice-index 0 --slice-total 2   # machine 1
-python3 -m sync extract --slice-index 1 --slice-total 2   # machine 2
+# Skip the HuggingFace upload (local extraction only)
+python3 -m sync --no-upload
+
+# Deep self-heal: content-verify sources and Parquet shards, re-fetching corruption
+python3 -m sync --verify
+
+# Split extraction across two machines
+python3 -m sync --slice-index 0 --slice-total 2   # machine 1
+python3 -m sync --slice-index 1 --slice-total 2   # machine 2
 ```
 
-### Upload to HuggingFace
+Source files are saved as `part_XXXX.jsonl.gz` (renamed from S3's `part_XXXX.gz` so HuggingFace's dataset viewer detects the format).
 
-```bash
-# Upload all untracked parquet files (smallest-first, 50 per batch)
-python3 -m sync upload
-
-# Custom batch size
-python3 -m sync upload --batch-size 100
-```
+The extractor derives each entity's schema by scanning the source data — there is no hardcoded field list. Scalar attributes (id, doi, title, language, publication year, type, FWCI, open-access and bibliographic metadata, …) are collected into a single **main** table per entity; every list- or dict-valued field becomes its own **relationship** table. Each source shard produces one Parquet file per table. The HuggingFace reconcile uploads new and changed Parquet files and prunes any that no longer exist locally (`--no-prune` to upload additively).
 
 ### Entity layout
 
