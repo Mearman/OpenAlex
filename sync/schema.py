@@ -1555,9 +1555,20 @@ def _schema_from_source_dir(
     # a worker stages a partition into the snapshot dir via a symlink to
     # an external mount (e.g. SSD), where the entity dir contains a symlink
     # to the partition source files.
-    import os as _os
-    found: list[Path] = []
+    # Prefer the updated_date=* partition layout: it is fast and, crucially,
+    # does not descend into relationship parquet subdirectories. Fall back to a
+    # recursive walk for layouts without date partitions or with symlink-staged
+    # sources (followlinks=True, since pathlib glob does not follow symlinks).
+    files: list[Path] = []
     if source_dir.is_dir():
+        files = sorted(
+            f for f in source_dir.glob("updated_date=*/*.gz")
+            if not f.name.startswith("._")
+            and (f.name.endswith(".jsonl.gz") or f.suffix == ".gz")
+        )
+    if not files and source_dir.is_dir():
+        import os as _os
+        found: list[Path] = []
         for root, _dirs, names in _os.walk(source_dir, followlinks=True):
             root_path = Path(root)
             for name in names:
@@ -1565,7 +1576,7 @@ def _schema_from_source_dir(
                     continue
                 if name.endswith(".jsonl.gz") or name.endswith(".gz"):
                     found.append(root_path / name)
-    files = sorted(found)
+        files = sorted(found)
     if not files:
         raise FileNotFoundError(f"No source files found for {entity} in {source_dir}")
 

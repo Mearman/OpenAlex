@@ -848,7 +848,10 @@ def _worker_process_files(
 
 @lru_cache(maxsize=None)
 def _entity_schema(entity: str) -> EntitySchema:
-    return get_entity_schema(entity, source_dir=SNAPSHOT_DIR)
+    # Probe the entity-scoped source directory, not the whole snapshot root —
+    # otherwise the probe mixes records from every entity and derives a schema
+    # from whichever entity sorts first.
+    return get_entity_schema(entity, source_dir=SNAPSHOT_DIR / entity)
 
 
 def _extract_entity_relationships(record: dict, schema: EntitySchema) -> dict[str, list[dict]]:
