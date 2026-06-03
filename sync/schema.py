@@ -1371,7 +1371,8 @@ def probe_schema_multi(
 
 _SCHEMA_FILE_VERSION = 1
 _SCHEMA_FILE = Path(__file__).resolve().parent.parent / "openalex.schema.json"
-_PROBE_SAMPLE_SIZE = 100
+_PROBE_SAMPLE_SIZE = 100  # records sampled per file
+_PROBE_SAMPLE_FILES = 25  # files sampled, evenly spaced across the date range
 
 
 def _schema_file_path() -> Path:
@@ -1567,13 +1568,27 @@ def _schema_from_source_dir(
     files = sorted(found)
     if not files:
         raise FileNotFoundError(f"No source files found for {entity} in {source_dir}")
+
+    # Sample deterministically across the full sorted file list (the partitions
+    # are date-ordered) rather than only the first file, so relationships and
+    # scalar columns that appear only in newer or older partitions are observed.
+    # Evenly-spaced strides over the sorted list make the sample reproducible.
+    n = len(files)
+    if n <= _PROBE_SAMPLE_FILES:
+        sample_files = files
+    else:
+        stride = n / _PROBE_SAMPLE_FILES
+        sample_files = [files[int(i * stride)] for i in range(_PROBE_SAMPLE_FILES)]
+
     records: list[dict[str, Any]] = []
-    for file in files:
+    for file in sample_files:
+        taken = 0
         for record in iter_jsonl(file):
             if isinstance(record, dict):
                 records.append(record)
-            if len(records) >= _PROBE_SAMPLE_SIZE:
-                return probe_schema_multi(entity, records, seed_schema=seed_schema)
+                taken += 1
+            if taken >= _PROBE_SAMPLE_SIZE:
+                break
     if not records:
         raise RuntimeError(f"No readable records found for {entity} in {source_dir}")
     return probe_schema_multi(entity, records, seed_schema=seed_schema)
