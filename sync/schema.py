@@ -77,6 +77,47 @@ def _py_type_name(value: Any) -> str:
     return "str"
 
 
+def _widen_scalar_type(types: set[str]) -> str:
+    """Widen a set of observed scalar types to one column type.
+
+    A string anywhere forces string (the lossless sink, since any scalar
+    coerces to str); otherwise float subsumes int, and int subsumes bool.
+    An all-null column defaults to string. This guarantees a single Arrow
+    type per main-table column even when a field is typed inconsistently
+    across records (e.g. a code stored as "12" in some rows and 12 in others).
+    """
+    if not types or "str" in types:
+        return "str"
+    if "float" in types:
+        return "float"
+    if "int" in types:
+        return "int"
+    if "bool" in types:
+        return "bool"
+    return "str"
+
+
+def _coerce_scalar(value: Any, typ: str) -> Any:
+    """Coerce a scalar to its declared (widened) main-table column type so
+    every row in a shard is homogeneous. ``None`` passes through unchanged.
+
+    Numeric/bool coercions only run on columns the probe found homogeneous;
+    a genuinely non-coercible value raises loudly rather than being silently
+    dropped — surfacing a real data anomaly the broad sample missed.
+    """
+    if value is None:
+        return None
+    if typ == "str":
+        return value if isinstance(value, str) else str(value)
+    if typ == "bool":
+        return bool(value)
+    if typ == "int":
+        return int(value)
+    if typ == "float":
+        return float(value)
+    return str(value)
+
+
 # ── Schema types ────────────────────────────────────────────────────────
 
 
@@ -869,7 +910,9 @@ def extract_relationships(
             continue
         has_scalar = True
         for sc in fs.scalar_cols:
-            main_row[sc["col"]] = _resolve_nested(record, sc["path"])
+            main_row[sc["col"]] = _coerce_scalar(
+                _resolve_nested(record, sc["path"]), sc["type"],
+            )
     if has_scalar:
         result[f"{_singular(schema.entity)}_main"] = [main_row]
 
@@ -1350,6 +1393,23 @@ def probe_schema_multi(
                 classified_empty.discard(key)
 
     observed_fields = list(seen_json_keys.values())
+
+    # Widen each scalar column's type across all sampled records. A column that
+    # is a string in any record must be typed as string so extraction coerces
+    # losslessly; mixing str and int would otherwise break Arrow's one-type-
+    # per-column inference at write time.
+    for fs in observed_fields:
+        if fs.pattern != "scalar":
+            continue
+        for sc in fs.scalar_cols:
+            observed_types: set[str] = set()
+            for rec in records:
+                val = _resolve_nested(rec, sc["path"])
+                if val is None:
+                    continue
+                observed_types.add(_py_type_name(val))
+            sc["type"] = _widen_scalar_type(observed_types)
+
     seed_fields = seed_schema.fields if seed_schema is not None else None
     fields = _merge_field_schemas(observed_fields, seed_fields)
 
