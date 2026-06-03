@@ -627,6 +627,15 @@ def _extract_one_source_file(
 
     buffers: dict[str, list[dict]] = {rt: [] for rt in rel_types}
 
+    # The main entity table (one row per record) is written in a single batch
+    # at file close so its column types are inferred from every row in the
+    # partition — a column absent from the first batch but present later would
+    # otherwise be locked to a null type. Identify it so the inner loop does
+    # not mid-flush it.
+    main_rel = next(
+        (fs.rel_name for fs in schema.fields if fs.pattern == "scalar"), None
+    )
+
     # Cache globals for inner-loop performance
     _buffers = buffers
     _writers = writers
@@ -638,7 +647,7 @@ def _extract_one_source_file(
             if buf is None:
                 continue
             buf.extend(rows)
-            if len(buf) >= batch_size:
+            if rt != main_rel and len(buf) >= batch_size:
                 _writers[rt].write_batch(buf)
                 _buffers[rt] = []
 

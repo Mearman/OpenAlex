@@ -27,14 +27,13 @@ log = logging.getLogger(__name__)
 
 # ── Skip rules ──────────────────────────────────────────────────────────
 # Fields that are NOT extracted as relationship tables.
+# Fields skipped entirely: denormalised singular projections of list
+# relationships (their data is already captured by the corresponding array
+# field), so extracting them would duplicate rows. Everything else — including
+# scalar-bearing metadata dicts like open_access, biblio, geo, summary_stats —
+# is captured: scalars and the scalar leaves of such dicts flow into the main
+# entity table via the "scalar" pattern.
 _SKIP_FIELDS: frozenset[str] = frozenset({
-    "summary_stats",
-    "geo",
-    "biblio",
-    "open_access",
-    "citation_normalized_percentile",
-    "cited_by_percentile_year",
-    "has_content",
     "primary_location",
     "best_oa_location",
     "primary_topic",
@@ -64,6 +63,20 @@ def _singular(entity: str) -> str:
     return entity
 
 
+def _py_type_name(value: Any) -> str:
+    """Observed Python scalar type name for main-table column documentation.
+
+    bool is checked before int because bool is a subclass of int.
+    """
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    return "str"
+
+
 # ── Schema types ────────────────────────────────────────────────────────
 
 
@@ -85,6 +98,12 @@ class FieldSchema:
         nested: Sub-array schemas for nested extraction
         col_renames: Rename columns from JSON key → parquet column
         is_singular_dict: True if the JSON value is a single dict, not an array
+        scalar_cols: For the "scalar" pattern, the main-table columns this
+            field contributes. Each entry is ``{"col", "path", "type"}`` where
+            ``path`` is a dot-path resolved from the record root and ``type``
+            is the observed Python type name ("str"/"int"/"float"/"bool").
+            A top-level scalar contributes one column; a flattened metadata
+            dict (e.g. open_access) contributes one per scalar leaf.
     """
 
     json_key: str
@@ -96,6 +115,7 @@ class FieldSchema:
     nested: list[FieldSchema] = field(default_factory=list)
     col_renames: dict[str, str] = field(default_factory=dict)
     is_singular_dict: bool = False
+    scalar_cols: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -115,6 +135,8 @@ class FieldSchema:
             d["col_renames"] = self.col_renames
         if self.is_singular_dict:
             d["is_singular_dict"] = True
+        if self.scalar_cols:
+            d["scalar_cols"] = self.scalar_cols
         return d
 
     @classmethod
@@ -129,6 +151,7 @@ class FieldSchema:
             nested=[cls.from_dict(n) for n in d.get("nested", [])],
             col_renames=d.get("col_renames", {}),
             is_singular_dict=d.get("is_singular_dict", False),
+            scalar_cols=d.get("scalar_cols", []),
         )
 
 
@@ -199,6 +222,13 @@ def _merge_field_schema(primary: FieldSchema, secondary: FieldSchema | None) -> 
         if field.json_key not in seen_nested:
             merged_nested.append(field)
 
+    merged_scalar_cols = list(primary.scalar_cols)
+    seen_cols = {sc["col"] for sc in primary.scalar_cols}
+    for sc in secondary.scalar_cols:
+        if sc["col"] not in seen_cols:
+            merged_scalar_cols.append(sc)
+            seen_cols.add(sc["col"])
+
     return FieldSchema(
         json_key=primary.json_key,
         pattern=primary.pattern,
@@ -209,6 +239,7 @@ def _merge_field_schema(primary: FieldSchema, secondary: FieldSchema | None) -> 
         nested=merged_nested,
         col_renames={**secondary.col_renames, **primary.col_renames},
         is_singular_dict=primary.is_singular_dict or secondary.is_singular_dict,
+        scalar_cols=merged_scalar_cols,
     )
 
 
@@ -785,6 +816,11 @@ def extract_relationships(
     for fs in schema.fields:
         value = record.get(fs.json_key)
 
+        # Scalar fields are collected into the main entity table below, not
+        # dispatched as relationships.
+        if fs.pattern == "scalar":
+            continue
+
         # Handle None / empty
         if value is None:
             continue
@@ -821,6 +857,21 @@ def extract_relationships(
 
         for rel_name, rows in extracted.items():
             result.setdefault(rel_name, []).extend(rows)
+
+    # ── Main entity table: one row per record holding every scalar column ──
+    # Columns are fixed by the schema's scalar fields, so each row carries the
+    # same keys (missing values resolve to None) and the per-shard parquet has
+    # a stable column set.
+    main_row: dict[str, Any] = {schema.id_col: entity_id}
+    has_scalar = False
+    for fs in schema.fields:
+        if fs.pattern != "scalar":
+            continue
+        has_scalar = True
+        for sc in fs.scalar_cols:
+            main_row[sc["col"]] = _resolve_nested(record, sc["path"])
+    if has_scalar:
+        result[f"{_singular(schema.entity)}_main"] = [main_row]
 
     return result
 
@@ -889,9 +940,13 @@ def _add_empty_list_field(
         ))
     elif any(key.endswith(s) for s in _STRING_LIST_SUFFIXES):
         fields.append(FieldSchema(json_key=key, pattern="string_list", rel_name=rel_name))
-    else:
-        # Default: treat as id_ref (list of dicts with IDs)
-        fields.append(FieldSchema(json_key=key, pattern="id_ref", rel_name=rel_name))
+    # No default: a field that is null/empty in every sampled record and whose
+    # name matches no known relationship is NOT assumed to be a relationship.
+    # The old `else: id_ref` fallback fabricated empty relationship tables for
+    # scalar fields that happened to be null in the sample (e.g. work.doi when
+    # absent) and for any unrecognised key. Such fields are left unclassified
+    # here; if they ever carry real data in another sampled record, the
+    # type-aware pass in probe_schema_multi reclassifies them from that data.
 
 
 def _classify_field(
@@ -922,6 +977,21 @@ def _classify_field(
     if value is None:
         # Classify by key name heuristics, same as empty lists
         _add_empty_list_field(key, entity, rel_prefix, fields)
+        return fields
+
+    # ── Scalar values → main entity table column ──
+    # Strings, numbers and booleans are attributes of the entity itself, not
+    # relationships. They are collected into a single main table (rel_name
+    # "{singular}_main") keyed by the entity id. The entity's own "id" is
+    # already captured as the id column, so skip it here.
+    if isinstance(value, (str, int, float, bool)):
+        if key == "id":
+            return fields
+        fields.append(FieldSchema(
+            json_key=key, pattern="scalar",
+            rel_name=f"{sing}_main",
+            scalar_cols=[{"col": key, "path": key, "type": _py_type_name(value)}],
+        ))
         return fields
 
     # ── Dict values ──
@@ -970,7 +1040,23 @@ def _classify_field(
                 ],
             )
             fields.append(inv_fs)
-        # Otherwise skip (metadata wrapper like biblio, open_access, etc.)
+        # Otherwise: a metadata wrapper dict (biblio, open_access, geo,
+        # summary_stats, citation_normalized_percentile, …). Flatten its scalar
+        # leaves into main-table columns named "{key}_{subkey}". Sub-dicts and
+        # sub-lists inside the wrapper are not relationships of this entity and
+        # are dropped. Only applies when no specific dict handler matched above.
+        if not fields:
+            scalar_cols = [
+                {"col": f"{key}_{sk}", "path": f"{key}.{sk}", "type": _py_type_name(sv)}
+                for sk, sv in value.items()
+                if isinstance(sv, (str, int, float, bool))
+            ]
+            if scalar_cols:
+                fields.append(FieldSchema(
+                    json_key=key, pattern="scalar",
+                    rel_name=f"{sing}_main",
+                    scalar_cols=scalar_cols,
+                ))
         return fields
 
     # ── List values ──
@@ -1226,17 +1312,34 @@ def probe_schema_multi(
         all_keys.update(record.keys())
 
     seen_json_keys: dict[str, FieldSchema] = {}
+    classified_real: set[str] = set()   # record keys classified from real data
+    classified_empty: set[str] = set()  # record keys classified from null/empty
 
     for record in records:
         for key in sorted(record.keys()):
             value = record[key]
-            existing = seen_json_keys.get(key)
-            # Skip if we already classified this key from real data
-            if existing is not None and value is not None:
-                continue
-            # Allow re-classification: heuristic (from None/empty) → real data
-            new_fields = _classify_field(key, value, entity, all_keys)
-            seen_json_keys.update({f.json_key: f for f in new_fields})
+            is_empty = value is None or (
+                isinstance(value, (list, dict)) and len(value) == 0
+            )
+            if is_empty:
+                # Classify an empty value only if this key has never been seen
+                # with real data nor already heuristically classified. Real data
+                # observed later for the same key takes precedence.
+                if key in classified_real or key in classified_empty:
+                    continue
+                new_fields = _classify_field(key, value, entity, all_keys)
+                seen_json_keys.update({f.json_key: f for f in new_fields})
+                classified_empty.add(key)
+            else:
+                # Real data always (re)classifies, overriding any prior
+                # null-sample heuristic placeholder for this key, then locks
+                # the key so later records skip re-classification.
+                if key in classified_real:
+                    continue
+                new_fields = _classify_field(key, value, entity, all_keys)
+                seen_json_keys.update({f.json_key: f for f in new_fields})
+                classified_real.add(key)
+                classified_empty.discard(key)
 
     observed_fields = list(seen_json_keys.values())
     seed_fields = seed_schema.fields if seed_schema is not None else None
