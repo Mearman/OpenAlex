@@ -10,6 +10,18 @@
           "rel_name": "author_affiliations"
         },
         {
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
           "extra_cols": [
             "works_count",
             "oa_works_count",
@@ -20,43 +32,117 @@
           "rel_name": "author_counts_by_year"
         },
         {
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
           "json_key": "display_name_alternatives",
           "pattern": "string_list",
           "rel_name": "author_display_name_alternatives"
         },
         {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "author_external_ids"
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "author_last_known_institutions"
-        },
-        {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "author_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "author_topic_share"
-        },
-        {
           "extra_cols": [
-            "count",
-            "score"
+            "issn_l",
+            "issn",
+            "is_oa",
+            "is_in_doaj",
+            "is_core",
+            "host_organization",
+            "host_organization_name",
+            "type"
           ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "author_topics"
+          "id_path": "id",
+          "json_key": "sources",
+          "pattern": "id_ref",
+          "rel_name": "author_sources"
+        },
+        {
+          "json_key": "summary_stats",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "summary_stats_2yr_mean_citedness",
+              "path": "summary_stats.2yr_mean_citedness",
+              "type": "float"
+            },
+            {
+              "col": "summary_stats_h_index",
+              "path": "summary_stats.h_index",
+              "type": "int"
+            },
+            {
+              "col": "summary_stats_i10_index",
+              "path": "summary_stats.i10_index",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         },
         {
           "extra_cols": [
-            "col4",
+            "level",
             "score",
             "count"
           ],
@@ -66,89 +152,150 @@
           "rel_name": "author_x_concepts"
         },
         {
+          "extra_cols": [
+            "ror",
+            "country_code",
+            "type"
+          ],
           "id_path": "id",
-          "json_key": "sources",
+          "json_key": "last_known_institutions",
           "pattern": "id_ref",
-          "rel_name": "author_sources"
+          "rel_name": "author_last_known_institutions"
+        },
+        {
+          "json_key": "topic_share",
+          "pattern": "topic_share",
+          "rel_name": "author_topic_share"
+        },
+        {
+          "extra_cols": [
+            "count"
+          ],
+          "id_path": "subfield.id",
+          "json_key": "topics",
+          "pattern": "nested_id_ref",
+          "rel_name": "author_topics"
+        },
+        {
+          "json_key": "orcid",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "orcid",
+              "path": "orcid",
+              "type": "str"
+            }
+          ]
         }
       ],
       "id_col": "author_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "awards": {
       "entity": "awards",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "award_affiliations"
+          "json_key": "amount",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "amount",
+              "path": "amount",
+              "type": "float"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "award_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "award_display_name_alternatives"
+          "json_key": "currency",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "currency",
+              "path": "currency",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "award_external_ids"
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "award_last_known_institutions"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "award_orcid"
+          "json_key": "end_date",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "end_date",
+              "path": "end_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "award_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "award_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "award_x_concepts"
-        },
-        {
-          "json_key": "co_lead_investigator",
-          "pattern": "id_ref",
-          "rel_name": "award_co_lead_investigator"
+          "json_key": "end_year",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "end_year",
+              "path": "end_year",
+              "type": "int"
+            }
+          ]
         },
         {
           "json_key": "funded_outputs",
           "pattern": "url_list",
           "rel_name": "award_funded_outputs"
+        },
+        {
+          "json_key": "funded_outputs_count",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "funded_outputs_count",
+              "path": "funded_outputs_count",
+              "type": "int"
+            }
+          ]
         },
         {
           "id_path": "id",
@@ -158,116 +305,359 @@
           "rel_name": "award_funders"
         },
         {
-          "json_key": "investigators",
-          "pattern": "id_ref",
+          "json_key": "funder_award_id",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "funder_award_id",
+              "path": "funder_award_id",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "funder_scheme",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "funder_scheme",
+              "path": "funder_scheme",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "funding_type",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "funding_type",
+              "path": "funding_type",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "landing_page_url",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "landing_page_url",
+              "path": "landing_page_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "col_renames": {
+            "is_co_lead": false,
+            "is_lead": true
+          },
+          "is_singular_dict": true,
+          "json_key": "lead_investigator",
+          "nested": [
+            {
+              "json_key": "affiliation",
+              "pattern": "investigators",
+              "rel_name": "award_investigator_affiliations"
+            }
+          ],
+          "pattern": "investigators",
           "rel_name": "award_investigators"
         },
         {
-          "json_key": "lead_investigator",
-          "pattern": "id_ref",
-          "rel_name": "award_lead_investigator"
+          "json_key": "provenance",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "provenance",
+              "path": "provenance",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "start_date",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "start_date",
+              "path": "start_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "start_year",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "start_year",
+              "path": "start_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "doi",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "doi",
+              "path": "doi",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "investigators",
+          "nested": [
+            {
+              "json_key": "affiliation",
+              "pattern": "investigators",
+              "rel_name": "award_investigator_affiliations"
+            }
+          ],
+          "pattern": "investigators",
+          "rel_name": "award_investigators"
         }
       ],
       "id_col": "award_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "concepts": {
       "entity": "concepts",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "concept_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
           "extra_cols": [
             "works_count",
-            "oa_works_count",
-            "cited_by_count"
+            "cited_by_count",
+            "oa_works_count"
           ],
           "json_key": "counts_by_year",
           "pattern": "time_series",
           "rel_name": "concept_counts_by_year"
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "concept_display_name_alternatives"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "concept_external_ids"
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "concept_last_known_institutions"
+          "json_key": "level",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "level",
+              "path": "level",
+              "type": "int"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "concept_orcid"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "concept_topic_share"
+          "json_key": "wikidata",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "wikidata",
+              "path": "wikidata",
+              "type": "str"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "concept_topics"
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "concept_x_concepts"
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "json_key": "ancestors",
-          "pattern": "id_ref",
-          "rel_name": "concept_ancestors"
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "related_concepts",
-          "pattern": "id_ref",
-          "rel_name": "concept_related_concepts"
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
         }
       ],
       "id_col": "concept_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "continents": {
       "entity": "continents",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "continent_affiliations"
+          "id_path": "id",
+          "json_key": "countries",
+          "pattern": "id_ref",
+          "rel_name": "continent_countries"
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "continent_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "continent_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "continent_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "continent_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "display_name_alternatives",
@@ -275,68 +665,157 @@
           "rel_name": "continent_display_name_alternatives"
         },
         {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "continent_external_ids"
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "continent_last_known_institutions"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "continent_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "continent_orcid"
+          "json_key": "wikidata_id",
+          "pattern": "scalar",
+          "rel_name": "continent_main",
+          "scalar_cols": [
+            {
+              "col": "wikidata_id",
+              "path": "wikidata_id",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "continent_topic_share"
+          "json_key": "wikidata_url",
+          "pattern": "scalar",
+          "rel_name": "continent_main",
+          "scalar_cols": [
+            {
+              "col": "wikidata_url",
+              "path": "wikidata_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "continent_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "continent_x_concepts"
+          "json_key": "wikipedia_url",
+          "pattern": "scalar",
+          "rel_name": "continent_main",
+          "scalar_cols": [
+            {
+              "col": "wikipedia_url",
+              "path": "wikipedia_url",
+              "type": "str"
+            }
+          ]
         }
       ],
       "id_col": "continent_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "countries": {
       "entity": "countries",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "countrie_affiliations"
+          "json_key": "alpha_3",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "alpha_3",
+              "path": "alpha_3",
+              "type": "str"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "countrie_counts_by_year"
+          "json_key": "authors_api_url",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "authors_api_url",
+              "path": "authors_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "continent",
+          "pattern": "taxonomy_parent",
+          "rel_name": "countrie_continents"
+        },
+        {
+          "json_key": "continent_id",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "continent_id",
+              "path": "continent_id",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "country_code",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "country_code",
+              "path": "country_code",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "display_name_alternatives",
@@ -344,114 +823,191 @@
           "rel_name": "countrie_display_name_alternatives"
         },
         {
+          "json_key": "full_name",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "full_name",
+              "path": "full_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "countrie_external_ids"
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "countrie_last_known_institutions"
+          "json_key": "institutions_api_url",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "institutions_api_url",
+              "path": "institutions_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "countrie_orcid"
+          "json_key": "is_global_south",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "is_global_south",
+              "path": "is_global_south",
+              "type": "bool"
+            }
+          ]
         },
         {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "countrie_topic_share"
+          "json_key": "numeric",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "numeric",
+              "path": "numeric",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "countrie_topics"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "countrie_x_concepts"
+          "json_key": "wikidata_url",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "wikidata_url",
+              "path": "wikidata_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "wikipedia_url",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "wikipedia_url",
+              "path": "wikipedia_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "countrie_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "str"
     },
     "domains": {
       "entity": "domains",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "domain_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "domain_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "domain_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "domain_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "domain_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "domain_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "display_name_alternatives",
           "pattern": "string_list",
           "rel_name": "domain_display_name_alternatives"
-        },
-        {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "domain_external_ids"
-        },
-        {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "domain_last_known_institutions"
-        },
-        {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "domain_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "domain_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "domain_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "domain_x_concepts"
         },
         {
           "id_path": "id",
@@ -460,33 +1016,108 @@
           "rel_name": "domain_fields"
         },
         {
+          "is_singular_dict": true,
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "domain_external_ids"
+        },
+        {
           "id_path": "id",
           "json_key": "siblings",
           "pattern": "id_ref",
           "rel_name": "domain_siblings"
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "domain_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "domain_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "domain_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "domain_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "fields": {
       "entity": "fields",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "field_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "field_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "field_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "field_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "field_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "field_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "display_name_alternatives",
@@ -494,52 +1125,17 @@
           "rel_name": "field_display_name_alternatives"
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "field_external_ids"
-        },
-        {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "field_last_known_institutions"
-        },
-        {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "field_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "field_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "field_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "field_x_concepts"
-        },
-        {
           "id_path": "id",
           "is_singular_dict": true,
           "json_key": "domain",
           "pattern": "taxonomy_parent",
           "rel_name": "field_domains"
+        },
+        {
+          "is_singular_dict": true,
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "field_external_ids"
         },
         {
           "id_path": "id",
@@ -552,19 +1148,91 @@
           "json_key": "subfields",
           "pattern": "id_ref",
           "rel_name": "field_subfields"
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "field_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "field_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "field_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "field_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "funders": {
       "entity": "funders",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "funder_affiliations"
+          "json_key": "alternate_titles",
+          "pattern": "string_list",
+          "rel_name": "funder_alternate_titles"
+        },
+        {
+          "json_key": "awards_count",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "awards_count",
+              "path": "awards_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "country_code",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "country_code",
+              "path": "country_code",
+              "type": "str"
+            }
+          ]
         },
         {
           "extra_cols": [
@@ -577,142 +1245,257 @@
           "rel_name": "funder_counts_by_year"
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "funder_display_name_alternatives"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "homepage_url",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "homepage_url",
+              "path": "homepage_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "funder_external_ids"
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "funder_last_known_institutions"
-        },
-        {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "funder_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "funder_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "funder_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "funder_x_concepts"
-        },
-        {
-          "json_key": "alternate_titles",
-          "pattern": "string_list",
-          "rel_name": "funder_alternate_titles"
-        },
-        {
           "json_key": "roles",
           "pattern": "roles",
           "rel_name": "funder_roles"
+        },
+        {
+          "json_key": "summary_stats",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "summary_stats_2yr_mean_citedness",
+              "path": "summary_stats.2yr_mean_citedness",
+              "type": "float"
+            },
+            {
+              "col": "summary_stats_h_index",
+              "path": "summary_stats.h_index",
+              "type": "int"
+            },
+            {
+              "col": "summary_stats_i10_index",
+              "path": "summary_stats.i10_index",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
         }
       ],
       "id_col": "funder_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "institution-types": {
       "entity": "institution-types",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "institution-type_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "institution-type_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "institution-type_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "institution-type_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "institution-type_display_name_alternatives"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "institution-type_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "institution-type_external_ids"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "institution-type_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "institution-type_last_known_institutions"
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "institution-type_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "institution-type_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "institution-type_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "institution-type_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "institution-type_x_concepts"
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "institution-type_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "institution-type_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "str"
     },
     "institutions": {
       "entity": "institutions",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "institution_affiliations"
+          "extra_cols": [
+            "ror",
+            "country_code",
+            "type",
+            "relationship"
+          ],
+          "id_path": "id",
+          "json_key": "associated_institutions",
+          "pattern": "id_ref",
+          "rel_name": "institution_associated_institutions"
+        },
+        {
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "country_code",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "country_code",
+              "path": "country_code",
+              "type": "str"
+            }
+          ]
         },
         {
           "extra_cols": [
@@ -725,24 +1508,221 @@
           "rel_name": "institution_counts_by_year"
         },
         {
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "display_name_acronyms",
+          "pattern": "string_list",
+          "rel_name": "institution_display_name_acronyms"
+        },
+        {
           "json_key": "display_name_alternatives",
           "pattern": "string_list",
           "rel_name": "institution_display_name_alternatives"
         },
         {
+          "json_key": "geo",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "geo_city",
+              "path": "geo.city",
+              "type": "str"
+            },
+            {
+              "col": "geo_geonames_city_id",
+              "path": "geo.geonames_city_id",
+              "type": "str"
+            },
+            {
+              "col": "geo_country_code",
+              "path": "geo.country_code",
+              "type": "str"
+            },
+            {
+              "col": "geo_country",
+              "path": "geo.country",
+              "type": "str"
+            },
+            {
+              "col": "geo_latitude",
+              "path": "geo.latitude",
+              "type": "float"
+            },
+            {
+              "col": "geo_longitude",
+              "path": "geo.longitude",
+              "type": "float"
+            }
+          ]
+        },
+        {
+          "json_key": "homepage_url",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "homepage_url",
+              "path": "homepage_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "institution_external_ids"
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "institution_last_known_institutions"
+          "json_key": "is_super_system",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "is_super_system",
+              "path": "is_super_system",
+              "type": "bool"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "institution_orcid"
+          "json_key": "lineage",
+          "pattern": "url_list",
+          "rel_name": "institution_lineage"
+        },
+        {
+          "json_key": "roles",
+          "pattern": "roles",
+          "rel_name": "institution_roles"
+        },
+        {
+          "json_key": "ror",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "ror",
+              "path": "ror",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "status",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "status",
+              "path": "status",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "summary_stats",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "summary_stats_2yr_mean_citedness",
+              "path": "summary_stats.2yr_mean_citedness",
+              "type": "float"
+            },
+            {
+              "col": "summary_stats_h_index",
+              "path": "summary_stats.h_index",
+              "type": "int"
+            },
+            {
+              "col": "summary_stats_i10_index",
+              "path": "summary_stats.i10_index",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "type",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "type",
+              "path": "type",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "type_id",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "type_id",
+              "path": "type_id",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         },
         {
           "json_key": "topic_share",
@@ -760,265 +1740,336 @@
           "rel_name": "institution_topics"
         },
         {
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
           "extra_cols": [
-            "col4",
-            "score",
-            "count"
+            "host_organization",
+            "host_organization_name"
           ],
           "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "institution_x_concepts"
-        },
-        {
-          "json_key": "associated_institutions",
-          "pattern": "id_ref",
-          "rel_name": "institution_associated_institutions"
-        },
-        {
-          "json_key": "display_name_acronyms",
-          "pattern": "string_list",
-          "rel_name": "institution_display_name_acronyms"
-        },
-        {
-          "json_key": "lineage",
-          "pattern": "url_list",
-          "rel_name": "institution_lineage"
-        },
-        {
           "json_key": "repositories",
           "pattern": "id_ref",
           "rel_name": "institution_repositories"
-        },
-        {
-          "json_key": "roles",
-          "pattern": "roles",
-          "rel_name": "institution_roles"
         }
       ],
       "id_col": "institution_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "keywords": {
       "entity": "keywords",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "keyword_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "keyword_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "keyword_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "keyword_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "keyword_display_name_alternatives"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "keyword_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "keyword_external_ids"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "keyword_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "keyword_last_known_institutions"
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "keyword_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "keyword_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "keyword_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "keyword_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "keyword_x_concepts"
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "keyword_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "keyword_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "str"
     },
     "languages": {
       "entity": "languages",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "language_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "language_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "language_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "language_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "language_display_name_alternatives"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "language_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "language_external_ids"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "language_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "language_last_known_institutions"
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "language_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "language_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "language_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "language_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "language_x_concepts"
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "language_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "language_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "str"
     },
     "licenses": {
       "entity": "licenses",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "license_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "license_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "license_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "license_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "license_display_name_alternatives"
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "license_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "license_external_ids"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "license_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "license_last_known_institutions"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "license_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "license_orcid"
+          "json_key": "url",
+          "pattern": "scalar",
+          "rel_name": "license_main",
+          "scalar_cols": [
+            {
+              "col": "url",
+              "path": "url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "license_topic_share"
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "license_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "license_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "license_x_concepts"
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "license_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "license_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "str"
     },
     "publishers": {
       "entity": "publishers",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "publisher_affiliations"
+          "json_key": "alternate_titles",
+          "pattern": "string_list",
+          "rel_name": "publisher_alternate_titles"
+        },
+        {
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "country_codes",
+          "pattern": "string_list",
+          "rel_name": "publisher_country_codes"
         },
         {
           "extra_cols": [
             "works_count",
-            "oa_works_count",
             "cited_by_count"
           ],
           "json_key": "counts_by_year",
@@ -1026,55 +2077,46 @@
           "rel_name": "publisher_counts_by_year"
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "publisher_display_name_alternatives"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "hierarchy_level",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "hierarchy_level",
+              "path": "hierarchy_level",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "publisher_external_ids"
-        },
-        {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "publisher_last_known_institutions"
-        },
-        {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "publisher_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "publisher_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "publisher_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "publisher_x_concepts"
-        },
-        {
-          "json_key": "alternate_titles",
-          "pattern": "string_list",
-          "rel_name": "publisher_alternate_titles"
         },
         {
           "json_key": "lineage",
@@ -1087,6 +2129,124 @@
           "rel_name": "publisher_roles"
         },
         {
+          "json_key": "sources_api_url",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "sources_api_url",
+              "path": "sources_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "summary_stats",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "summary_stats_2yr_mean_citedness",
+              "path": "summary_stats.2yr_mean_citedness",
+              "type": "float"
+            },
+            {
+              "col": "summary_stats_h_index",
+              "path": "summary_stats.h_index",
+              "type": "int"
+            },
+            {
+              "col": "summary_stats_i10_index",
+              "path": "summary_stats.i10_index",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "wikidata_id",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "wikidata_id",
+              "path": "wikidata_id",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "homepage_url",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "homepage_url",
+              "path": "homepage_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "ror_id",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "ror_id",
+              "path": "ror_id",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
           "id_path": "id",
           "is_singular_dict": true,
           "json_key": "parent_publisher",
@@ -1095,154 +2255,235 @@
         }
       ],
       "id_col": "publisher_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "sdgs": {
       "entity": "sdgs",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "sdg_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "sdg_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "sdg_display_name_alternatives"
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
         },
         {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "sdg_external_ids"
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "sdg_last_known_institutions"
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "sdg_orcid"
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "sdg_topic_share"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "sdg_topics"
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "sdg_x_concepts"
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "sdg_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "sdg_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "source-types": {
       "entity": "source-types",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "source-type_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "source-type_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "source-type_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "source-type_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "source-type_display_name_alternatives"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "source-type_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "source-type_external_ids"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "source-type_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "source-type_last_known_institutions"
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "source-type_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "source-type_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "source-type_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "source-type_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "source-type_x_concepts"
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "source-type_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "source-type_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "str"
     },
     "sources": {
       "entity": "sources",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "source_affiliations"
+          "json_key": "alternate_titles",
+          "pattern": "string_list",
+          "rel_name": "source_alternate_titles"
+        },
+        {
+          "json_key": "apc_prices",
+          "pattern": "apc_prices",
+          "rel_name": "source_apc_prices"
+        },
+        {
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
           "extra_cols": [
@@ -1255,24 +2496,335 @@
           "rel_name": "source_counts_by_year"
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "source_display_name_alternatives"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "source_external_ids"
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "source_last_known_institutions"
+          "json_key": "is_core",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_core",
+              "path": "is_core",
+              "type": "bool"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "source_orcid"
+          "json_key": "is_high_oa_rate",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_high_oa_rate",
+              "path": "is_high_oa_rate",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "is_in_doaj",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_in_doaj",
+              "path": "is_in_doaj",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "is_in_scielo",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_in_scielo",
+              "path": "is_in_scielo",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "is_oa",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_oa",
+              "path": "is_oa",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "is_ojs",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_ojs",
+              "path": "is_ojs",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "issn",
+          "pattern": "issn",
+          "rel_name": "source_issns"
+        },
+        {
+          "json_key": "oa_works_count",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "oa_works_count",
+              "path": "oa_works_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "societies",
+          "pattern": "societies",
+          "rel_name": "source_societies"
+        },
+        {
+          "json_key": "summary_stats",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "summary_stats_2yr_mean_citedness",
+              "path": "summary_stats.2yr_mean_citedness",
+              "type": "float"
+            },
+            {
+              "col": "summary_stats_h_index",
+              "path": "summary_stats.h_index",
+              "type": "int"
+            },
+            {
+              "col": "summary_stats_i10_index",
+              "path": "summary_stats.i10_index",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "type",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "type",
+              "path": "type",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "homepage_url",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "homepage_url",
+              "path": "homepage_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "country_code",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "country_code",
+              "path": "country_code",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "issn_l",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "issn_l",
+              "path": "issn_l",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "first_publication_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "first_publication_year",
+              "path": "first_publication_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "last_publication_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "last_publication_year",
+              "path": "last_publication_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "is_in_doaj_since_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_in_doaj_since_year",
+              "path": "is_in_doaj_since_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "oa_flip_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "oa_flip_year",
+              "path": "oa_flip_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "apc_usd",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "apc_usd",
+              "path": "apc_usd",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "host_organization",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "host_organization",
+              "path": "host_organization",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "host_organization_lineage",
+          "pattern": "url_list",
+          "rel_name": "source_host_organization_lineage"
+        },
+        {
+          "json_key": "host_organization_name",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "host_organization_name",
+              "path": "host_organization_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "is_high_oa_rate_since_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_high_oa_rate_since_year",
+              "path": "is_high_oa_rate_since_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "topic_share",
@@ -1281,123 +2833,73 @@
         },
         {
           "extra_cols": [
-            "count",
-            "score"
+            "count"
           ],
           "id_path": "subfield.id",
           "json_key": "topics",
           "pattern": "nested_id_ref",
           "rel_name": "source_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "source_x_concepts"
-        },
-        {
-          "json_key": "alternate_titles",
-          "pattern": "string_list",
-          "rel_name": "source_alternate_titles"
-        },
-        {
-          "json_key": "apc_prices",
-          "pattern": "apc_prices",
-          "rel_name": "source_apc_prices"
-        },
-        {
-          "json_key": "host_organization",
-          "pattern": "id_ref",
-          "rel_name": "source_host_organization"
-        },
-        {
-          "json_key": "issn",
-          "pattern": "issn",
-          "rel_name": "source_issn"
-        },
-        {
-          "json_key": "societies",
-          "pattern": "societies",
-          "rel_name": "source_societies"
-        },
-        {
-          "json_key": "host_organization_lineage",
-          "pattern": "url_list",
-          "rel_name": "source_host_organization_lineage"
         }
       ],
       "id_col": "source_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "subfields": {
       "entity": "subfields",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "subfield_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "subfield_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "subfield_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "subfield_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "subfield_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "subfield_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "display_name_alternatives",
           "pattern": "string_list",
           "rel_name": "subfield_display_name_alternatives"
-        },
-        {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "subfield_external_ids"
-        },
-        {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "subfield_last_known_institutions"
-        },
-        {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "subfield_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "subfield_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "subfield_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "subfield_x_concepts"
         },
         {
           "id_path": "id",
@@ -1414,79 +2916,114 @@
           "rel_name": "subfield_fields"
         },
         {
+          "is_singular_dict": true,
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "subfield_external_ids"
+        },
+        {
           "id_path": "id",
           "json_key": "siblings",
           "pattern": "id_ref",
           "rel_name": "subfield_siblings"
+        },
+        {
+          "id_path": "id",
+          "json_key": "topics",
+          "pattern": "id_ref",
+          "rel_name": "subfield_topics"
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "subfield_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "subfield_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "subfield_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "subfield_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "topics": {
       "entity": "topics",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "topic_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "topic_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "topic_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "topic_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "topic_display_name_alternatives"
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "topic_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "topic_external_ids"
-        },
-        {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "topic_last_known_institutions"
-        },
-        {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "topic_orcid"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "topic_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "topic_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "topic_x_concepts"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "topic_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
           "id_path": "id",
@@ -1501,6 +3038,12 @@
           "json_key": "field",
           "pattern": "taxonomy_parent",
           "rel_name": "topic_fields"
+        },
+        {
+          "is_singular_dict": true,
+          "json_key": "ids",
+          "pattern": "external_ids",
+          "rel_name": "topic_external_ids"
         },
         {
           "json_key": "keywords",
@@ -1519,87 +3062,160 @@
           "json_key": "subfield",
           "pattern": "taxonomy_parent",
           "rel_name": "topic_subfields"
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "topic_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "topic_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "topic_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "topic_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     },
     "work-types": {
       "entity": "work-types",
       "fields": [
         {
-          "id_path": "institution.id",
-          "json_key": "affiliations",
-          "pattern": "nested_id_ref",
-          "rel_name": "work-type_affiliations"
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "work-type_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "extra_cols": [
-            "works_count",
-            "oa_works_count",
-            "cited_by_count"
-          ],
-          "json_key": "counts_by_year",
-          "pattern": "time_series",
-          "rel_name": "work-type_counts_by_year"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "work-type_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "display_name_alternatives",
-          "pattern": "string_list",
-          "rel_name": "work-type_display_name_alternatives"
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "work-type_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "ids",
-          "pattern": "external_ids",
-          "rel_name": "work-type_external_ids"
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "work-type_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "work-type_last_known_institutions"
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "work-type_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "orcid",
-          "pattern": "id_ref",
-          "rel_name": "work-type_orcid"
+          "json_key": "works_api_url",
+          "pattern": "scalar",
+          "rel_name": "work-type_main",
+          "scalar_cols": [
+            {
+              "col": "works_api_url",
+              "path": "works_api_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "work-type_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "work-type_topics"
-        },
-        {
-          "extra_cols": [
-            "col4",
-            "score",
-            "count"
-          ],
-          "id_path": "id",
-          "json_key": "x_concepts",
-          "pattern": "id_ref",
-          "rel_name": "work-type_x_concepts"
+          "json_key": "works_count",
+          "pattern": "scalar",
+          "rel_name": "work-type_main",
+          "scalar_cols": [
+            {
+              "col": "works_count",
+              "path": "works_count",
+              "type": "int"
+            }
+          ]
         }
       ],
       "id_col": "work-type_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "str"
     },
     "works": {
       "entity": "works",
       "fields": [
         {
+          "is_singular_dict": true,
           "json_key": "abstract_inverted_index",
           "pattern": "json_blob",
-          "rel_name": "work_abstract_inverted_index"
+          "rel_name": "work_abstracts"
+        },
+        {
+          "json_key": "authors_count",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "authors_count",
+              "path": "authors_count",
+              "type": "int"
+            }
+          ]
         },
         {
           "extra_cols": [
@@ -1625,6 +3241,84 @@
           "rel_name": "work_awards"
         },
         {
+          "json_key": "biblio",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "biblio_volume",
+              "path": "biblio.volume",
+              "type": "str"
+            },
+            {
+              "col": "biblio_issue",
+              "path": "biblio.issue",
+              "type": "str"
+            },
+            {
+              "col": "biblio_first_page",
+              "path": "biblio.first_page",
+              "type": "str"
+            },
+            {
+              "col": "biblio_last_page",
+              "path": "biblio.last_page",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "citation_normalized_percentile",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "citation_normalized_percentile_value",
+              "path": "citation_normalized_percentile.value",
+              "type": "float"
+            },
+            {
+              "col": "citation_normalized_percentile_is_in_top_1_percent",
+              "path": "citation_normalized_percentile.is_in_top_1_percent",
+              "type": "bool"
+            },
+            {
+              "col": "citation_normalized_percentile_is_in_top_10_percent",
+              "path": "citation_normalized_percentile.is_in_top_10_percent",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "cited_by_percentile_year",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_percentile_year_min",
+              "path": "cited_by_percentile_year.min",
+              "type": "int"
+            },
+            {
+              "col": "cited_by_percentile_year_max",
+              "path": "cited_by_percentile_year.max",
+              "type": "int"
+            }
+          ]
+        },
+        {
           "extra_cols": [
             "level",
             "score"
@@ -1645,6 +3339,18 @@
           "rel_name": "work_corresponding_institution_ids"
         },
         {
+          "json_key": "countries_distinct_count",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "countries_distinct_count",
+              "path": "countries_distinct_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
           "extra_cols": [
             "cited_by_count"
           ],
@@ -1653,24 +3359,135 @@
           "rel_name": "work_counts_by_year"
         },
         {
-          "json_key": "funders",
-          "pattern": "id_ref",
-          "rel_name": "work_funders"
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
+          "json_key": "display_name",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "display_name",
+              "path": "display_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "doi",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "doi",
+              "path": "doi",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "fwci",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "fwci",
+              "path": "fwci",
+              "type": "float"
+            }
+          ]
+        },
+        {
+          "json_key": "has_content",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "has_content_pdf",
+              "path": "has_content.pdf",
+              "type": "bool"
+            },
+            {
+              "col": "has_content_grobid_xml",
+              "path": "has_content.grobid_xml",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "has_fulltext",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "has_fulltext",
+              "path": "has_fulltext",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "work_external_ids"
         },
         {
-          "json_key": "indexed_in",
-          "pattern": "id_ref",
-          "rel_name": "work_indexed_in"
+          "json_key": "institutions_distinct_count",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "institutions_distinct_count",
+              "path": "institutions_distinct_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "json_key": "institutions",
-          "pattern": "id_ref",
-          "rel_name": "work_institutions"
+          "json_key": "is_paratext",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "is_paratext",
+              "path": "is_paratext",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "is_retracted",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "is_retracted",
+              "path": "is_retracted",
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "is_xpac",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "is_xpac",
+              "path": "is_xpac",
+              "type": "bool"
+            }
+          ]
         },
         {
           "extra_cols": [
@@ -1683,29 +3500,108 @@
           "target_col": "keyword_id"
         },
         {
+          "json_key": "language",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "language",
+              "path": "language",
+              "type": "str"
+            }
+          ]
+        },
+        {
           "json_key": "locations",
           "pattern": "locations",
           "rel_name": "work_locations"
         },
         {
-          "json_key": "mesh",
-          "pattern": "id_ref",
-          "rel_name": "work_mesh"
+          "json_key": "locations_count",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "locations_count",
+              "path": "locations_count",
+              "type": "int"
+            }
+          ]
         },
         {
-          "json_key": "referenced_works",
-          "pattern": "id_ref",
-          "rel_name": "work_referenced_works"
+          "json_key": "open_access",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "open_access_is_oa",
+              "path": "open_access.is_oa",
+              "type": "bool"
+            },
+            {
+              "col": "open_access_oa_status",
+              "path": "open_access.oa_status",
+              "type": "str"
+            },
+            {
+              "col": "open_access_any_repository_has_fulltext",
+              "path": "open_access.any_repository_has_fulltext",
+              "type": "bool"
+            },
+            {
+              "col": "open_access_oa_url",
+              "path": "open_access.oa_url",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "related_works",
-          "pattern": "id_ref",
-          "rel_name": "work_related_works"
+          "json_key": "publication_date",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "publication_date",
+              "path": "publication_date",
+              "type": "str"
+            }
+          ]
         },
         {
-          "json_key": "sustainable_development_goals",
-          "pattern": "id_ref",
-          "rel_name": "work_sustainable_development_goals"
+          "json_key": "publication_year",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "publication_year",
+              "path": "publication_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "referenced_works_count",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "referenced_works_count",
+              "path": "referenced_works_count",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "title",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "title",
+              "path": "title",
+              "type": "str"
+            }
+          ]
         },
         {
           "extra_cols": [
@@ -1715,10 +3611,117 @@
           "json_key": "topics",
           "pattern": "nested_id_ref",
           "rel_name": "work_topics"
+        },
+        {
+          "json_key": "type",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "type",
+              "path": "type",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "updated_date",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "updated_date",
+              "path": "updated_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "indexed_in",
+          "pattern": "string_list",
+          "rel_name": "work_indexed_in"
+        },
+        {
+          "json_key": "related_works",
+          "pattern": "url_list",
+          "rel_name": "work_related_works"
+        },
+        {
+          "json_key": "referenced_works",
+          "pattern": "url_list",
+          "rel_name": "work_referenced_works"
+        },
+        {
+          "json_key": "apc_list",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "apc_list_value",
+              "path": "apc_list.value",
+              "type": "int"
+            },
+            {
+              "col": "apc_list_currency",
+              "path": "apc_list.currency",
+              "type": "str"
+            },
+            {
+              "col": "apc_list_value_usd",
+              "path": "apc_list.value_usd",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "mesh",
+          "pattern": "mesh",
+          "rel_name": "work_mesh"
+        },
+        {
+          "extra_cols": [
+            "score"
+          ],
+          "id_path": "id",
+          "json_key": "sustainable_development_goals",
+          "pattern": "id_ref",
+          "rel_name": "work_sustainable_development_goals"
+        },
+        {
+          "extra_cols": [
+            "ror"
+          ],
+          "id_path": "id",
+          "json_key": "funders",
+          "pattern": "id_ref",
+          "rel_name": "work_funders"
+        },
+        {
+          "json_key": "apc_paid",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "apc_paid_value",
+              "path": "apc_paid.value",
+              "type": "float"
+            },
+            {
+              "col": "apc_paid_currency",
+              "path": "apc_paid.currency",
+              "type": "str"
+            },
+            {
+              "col": "apc_paid_value_usd",
+              "path": "apc_paid.value_usd",
+              "type": "float"
+            }
+          ]
         }
       ],
       "id_col": "work_id",
-      "id_path": "id"
+      "id_path": "id",
+      "id_type": "int"
     }
   },
   "version": 1
