@@ -920,9 +920,15 @@ def _add_empty_list_field(
             extra_cols=["works_count", "cited_by_count", "oa_works_count"],
         ))
     elif key == "ids":
-        fields.append(FieldSchema(json_key=key, pattern="external_ids", rel_name=rel_name))
+        fields.append(FieldSchema(
+            json_key=key, pattern="external_ids", rel_name=rel_name,
+            is_singular_dict=True,
+        ))
     elif key == "abstract_inverted_index":
-        fields.append(FieldSchema(json_key=key, pattern="json_blob", rel_name=rel_name))
+        fields.append(FieldSchema(
+            json_key=key, pattern="json_blob", rel_name=f"{rel_prefix}abstracts",
+            is_singular_dict=True,
+        ))
     elif key == "funded_outputs":
         fields.append(FieldSchema(json_key=key, pattern="url_list", rel_name=rel_name))
     elif key == "grants":
@@ -1000,6 +1006,7 @@ def _classify_field(
             fields.append(FieldSchema(
                 json_key="ids", pattern="external_ids",
                 rel_name=f"{rel_prefix}external_ids",
+                is_singular_dict=True,
             ))
             # Check if ids contains an 'issn' array (source entities)
             if "issn" in value and isinstance(value.get("issn"), list):
@@ -1011,6 +1018,7 @@ def _classify_field(
             fields.append(FieldSchema(
                 json_key="abstract_inverted_index", pattern="json_blob",
                 rel_name=f"{rel_prefix}abstracts",
+                is_singular_dict=True,
             ))
         # Taxonomy parent: single dict with "id" and "display_name"
         elif "id" in value and "display_name" in value:
