@@ -122,30 +122,8 @@ def cmd_push(args) -> None:
     _git("push", check=False)
 
 
-def _find_untracked_parquets() -> list[tuple[int, str]]:
-    """Return untracked parquet files sorted by size (smallest first)."""
-    all_parquets: set[str] = set()
-    for p in SYNC_ROOT.rglob("*.parquet"):
-        if not p.name.startswith("._"):
-            all_parquets.add(str(p.relative_to(SYNC_ROOT)))
-
-    r = _git("ls-files")
-    tracked = {f for f in r.stdout.strip().split("\n") if f.endswith(".parquet")}
-
-    untracked = all_parquets - tracked
-    if not untracked:
-        return []
-
-    with_size: list[tuple[int, str]] = []
-    for rel in untracked:
-        full = SYNC_ROOT / rel
-        try:
-            sz = full.stat().st_size
-        except OSError:
-            sz = 0
-        with_size.append((sz, rel))
-    with_size.sort()
-    return with_size
+# Files deleted per HF commit when pruning obsolete remote parquets.
+_HF_DELETE_CHUNK = 100
 
 
 def _sync_git_refs() -> None:
@@ -161,32 +139,62 @@ def _sync_git_refs() -> None:
 
 
 def cmd_upload(args) -> None:
-    """Upload untracked parquet files to HuggingFace via the REST API."""
-    from huggingface_hub import HfApi, upload_large_folder
+    """Reconcile the HuggingFace dataset's parquet files with the local set.
+
+    Makes the remote mirror the canonical local extraction exactly:
+      1. Upload new and changed parquet files. ``upload_large_folder`` hashes
+         each file and uploads only those the server lacks or whose content
+         differs, so a shard that went from empty to populated (e.g.
+         ``external_ids``) is re-uploaded, and a renamed table lands at its new
+         path.
+      2. Prune remote parquet files absent from the local set — phantom
+         directories, renamed tables, dropped relationships — so obsolete files
+         from a previous (buggy) extraction don't linger on the dataset.
+
+    Pass ``--no-prune`` to upload additively without deleting anything.
+    """
+    from huggingface_hub import CommitOperationDelete, HfApi, upload_large_folder
 
     repo_id = args.repo_id
-    num_workers = args.workers
+    api = HfApi()
 
-    # Find which parquet files are untracked locally (for reporting)
-    untracked = _find_untracked_parquets()
-    if not untracked:
-        log("All parquet files already tracked locally")
-        return
+    # Canonical local parquet set (paths relative to the repo root, posix form).
+    local: set[str] = {
+        p.relative_to(SYNC_ROOT).as_posix()
+        for p in SYNC_ROOT.rglob("*.parquet")
+        if not p.name.startswith("._")
+    }
+    log(f"{len(local)} local parquet files; uploading new/changed with {args.workers} workers")
 
-    total = len(untracked)
-    log(f"{total} untracked parquet files, uploading via HF API with {num_workers} workers")
-
-    # upload_large_folder handles hashing, pre-upload, committing, and
-    # resumption automatically. It uploads ONLY files not already on the
-    # server, so re-running after an interruption is safe.
     upload_large_folder(
         repo_id=repo_id,
         folder_path=str(SYNC_ROOT),
         repo_type="dataset",
         allow_patterns=["*.parquet"],
-        ignore_patterns=["._*"],  # Apple Double files on ExFAT drives
-        num_workers=num_workers,
+        ignore_patterns=["._*"],  # Apple Double files
+        num_workers=args.workers,
     )
+
+    # Prune remote parquets that no longer exist locally so HF mirrors local.
+    if not args.no_prune:
+        remote = [
+            f for f in api.list_repo_files(repo_id, repo_type="dataset")
+            if f.endswith(".parquet")
+        ]
+        obsolete = sorted(set(remote) - local)
+        if obsolete:
+            log(f"Pruning {len(obsolete)} obsolete remote parquet files")
+            for i in range(0, len(obsolete), _HF_DELETE_CHUNK):
+                batch = obsolete[i:i + _HF_DELETE_CHUNK]
+                api.create_commit(
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    operations=[CommitOperationDelete(path_in_repo=f) for f in batch],
+                    commit_message=f"reconcile: prune {len(batch)} obsolete parquet files",
+                )
+            log(f"Pruned {len(obsolete)} obsolete remote files")
+        else:
+            log("No obsolete remote parquet files to prune")
 
     # Bring local git refs in line with what the server now has
     _sync_git_refs()
@@ -278,9 +286,15 @@ def main():
     subparsers.add_parser("push", help="Git push")
 
     # upload
-    p_upload = subparsers.add_parser("upload", help="Upload untracked parquet to HF via REST API")
+    p_upload = subparsers.add_parser(
+        "upload", help="Reconcile HF parquet files with the local set (upload new/changed, prune obsolete)"
+    )
     p_upload.add_argument("--workers", type=int, default=8, help="Parallel upload workers (default: 8)")
     p_upload.add_argument("--repo-id", type=str, default="Mearman/OpenAlex", help="HF dataset repo ID")
+    p_upload.add_argument(
+        "--no-prune", action="store_true",
+        help="Upload additively without deleting remote parquet files absent locally",
+    )
 
     # verify
     p_verify = subparsers.add_parser(
