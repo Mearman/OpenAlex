@@ -174,9 +174,12 @@ def _list_stale_files(dest: Path, remote_keys: set[str], prefix: str) -> list[Pa
     for f in local_root.rglob("*.jsonl.gz"):
         if not f.is_file():
             continue
-        # Reconstruct the original S3 key (strip .jsonl.gz → .gz)
+        # Reconstruct the original S3 key (strip .jsonl.gz → .gz). This is the
+        # inverse of _local_path_for_key, which appends ".jsonl.gz" in place of
+        # S3's ".gz"; the suffix is 9 characters, so stripping 8 would leave a
+        # stray dot (part_0000..gz) and spuriously flag every valid source stale.
         rel = str(f.relative_to(dest))
-        s3_key = rel[:-8] + ".gz" if rel.endswith(".jsonl.gz") else rel
+        s3_key = rel[:-len(".jsonl.gz")] + ".gz" if rel.endswith(".jsonl.gz") else rel
         if s3_key not in remote_keys:
             stale.append(f)
     # Also clean up any old-style .gz files (from before the rename)
