@@ -1525,7 +1525,7 @@ def _sync_provenance_from_remote(remote_spec: str) -> None:
         log.info("Provenance sync complete")
 
 
-def main(entity: str | None = None, force: bool = False, workers: int | None = None, batch_size: int | None = None, slice_index: int | None = None, slice_total: int | None = None, sync_provenance: str | None = None, output_dir: str | None = None, verify: bool = False) -> None:
+def main(entity: str | None = None, force: bool = False, workers: int | None = None, batch_size: int | None = None, slice_index: int | None = None, slice_total: int | None = None, sync_provenance: str | None = None, output_dir: str | None = None, verify: bool = True) -> None:
     """Extract relationship tables from JSONL snapshot."""
     import sync.common as _common
 
