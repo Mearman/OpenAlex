@@ -59,30 +59,111 @@ _RAM_HEADROOM_GB = 2
 _RAM_PER_WORKER_GB = 6
 
 
+def _get_memory_limit_bytes() -> int | None:
+    """Return the process's memory limit in bytes, or None if unlimited.
+
+    Checks in order: cgroup v2, cgroup v1, Slurm env vars, POSIX RLIMIT_AS.
+    Returns None if no limit is set (system memory is the effective limit).
+    """
+    # cgroup v2
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f:
+            val = f.read().strip()
+            if val != "max":
+                limit = int(val)
+                if limit < (1 << 62):
+                    return limit
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+    # cgroup v1
+    try:
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+            limit = int(f.read().strip())
+            if limit < (1 << 62):
+                return limit
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+    # Slurm env vars (in MB)
+    if "SLURM_MEM_PER_NODE" in os.environ:
+        return int(os.environ["SLURM_MEM_PER_NODE"]) * 1024 * 1024
+    if "SLURM_MEM_PER_CPU" in os.environ:
+        cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", "1"))
+        return int(os.environ["SLURM_MEM_PER_CPU"]) * cpus * 1024 * 1024
+
+    # POSIX RLIMIT_AS
+    try:
+        import resource
+        soft, _ = resource.getrlimit(resource.RLIMIT_AS)
+        if 0 < soft < (1 << 62):
+            return soft
+    except (ImportError, ValueError, OSError):
+        pass
+
+    return None
+
+
+def _get_cpu_count() -> int:
+    """Return CPUs available to this process, preferring Slurm-allocated cores."""
+    if "SLURM_CPUS_PER_TASK" in os.environ:
+        return int(os.environ["SLURM_CPUS_PER_TASK"])
+    if "SLURM_CPUS_ON_NODE" in os.environ:
+        return int(os.environ["SLURM_CPUS_ON_NODE"])
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("Cpus_allowed_list:"):
+                    spec = line.split(":", 1)[1].strip()
+                    count = 0
+                    for part in spec.split(","):
+                        if "-" in part:
+                            a, b = part.split("-")
+                            count += int(b) - int(a) + 1
+                        else:
+                            count += 1
+                    if count > 0:
+                        return count
+    except (FileNotFoundError, ValueError):
+        pass
+    return os.cpu_count() or 1
+
+
 def _auto_workers(reserve: int = 0) -> int:
     """Pick an extraction worker count that fits available CPU and RAM.
 
-    Uses ``sysconf`` to read total physical memory on Unix (Linux, macOS).
-    Falls back to ``_DEFAULT_WORKERS`` capped by the CPU count when
-    ``sysconf`` is not available (e.g. Windows).
+    On Slurm-managed nodes, uses the JOB's memory limit (cgroup or
+    SLURM_MEM_PER_NODE) rather than the node's total physical memory.
+    This prevents OOM kills when the sync runs as a small-memory job
+    on a large-memory compute node.
 
     ``reserve`` withholds that many CPUs from the count so a concurrent stage
     (e.g. a background upload running alongside extraction) has cores to use
     without oversubscribing the machine. RAM remains the other cap.
-
-    The chosen count is logged so the caller can audit the decision.
     """
-    cpu_count = os.cpu_count() or 1
+    cpu_count = _get_cpu_count()
     usable_cpu = max(1, cpu_count - max(0, reserve))
+
+    limit_bytes = _get_memory_limit_bytes()
+    if limit_bytes is not None:
+        limit_gb = limit_bytes / (1024 ** 3)
+        by_ram = max(1, int((limit_gb - _RAM_HEADROOM_GB) // _RAM_PER_WORKER_GB))
+        chosen = max(1, min(usable_cpu, by_ram))
+        log.info(
+            "Auto-sized workers to %d (%.0fGB job limit, %d CPUs, %d reserved, RAM cap %d)",
+            chosen, limit_gb, cpu_count, reserve, by_ram,
+        )
+        return chosen
+
+    # Fall back to node physical memory
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
         phys_pages = os.sysconf("SC_PHYS_PAGES")
         total_bytes = page_size * phys_pages
     except (AttributeError, ValueError, OSError):
-        # Non-Unix or sysconf names unavailable — fall back to CPU-bounded default.
         chosen = max(1, min(usable_cpu, _DEFAULT_WORKERS))
         log.info(
-            "Auto-sized workers to %d (RAM detection unavailable, %d CPUs, %d reserved)",
+            "Auto-sized workers to %d (no limit detected, %d CPUs, %d reserved)",
             chosen, cpu_count, reserve,
         )
         return chosen
@@ -91,7 +172,7 @@ def _auto_workers(reserve: int = 0) -> int:
     by_ram = max(1, int((total_gb - _RAM_HEADROOM_GB) // _RAM_PER_WORKER_GB))
     chosen = max(1, min(usable_cpu, by_ram))
     log.info(
-        "Auto-sized workers to %d (%.0fGB RAM, %d CPUs, %d reserved, RAM cap %d)",
+        "Auto-sized workers to %d (%.0fGB node RAM, %d CPUs, %d reserved, RAM cap %d)",
         chosen, total_gb, cpu_count, reserve, by_ram,
     )
     return chosen
