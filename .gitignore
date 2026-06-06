@@ -1,5 +1,6 @@
 # Legacy scripts and docs
 *.sh
+!bin/**/*.sh
 docs/
 CLAUDE.md
 AGENTS.md
