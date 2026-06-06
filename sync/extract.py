@@ -1204,7 +1204,11 @@ def convert_relationships(
     # treat shards already present on HF as completed. Avoids re-extracting
     # files another machine (e.g. a parallel worker on different hardware)
     # has already uploaded.
-    hf_completed = _hf_completed_source_keys(entity_type)
+    #
+    # When --force is set, the user explicitly wants re-extraction regardless
+    # of what's on HF, so skip the HF query entirely — it would just waste
+    # 40+ paginated API requests and then be ignored anyway.
+    hf_completed = {} if force else _hf_completed_source_keys(entity_type)
 
     # Build per-type pending-file sets and union of all files needed
     all_pending_types: list[str] = []
