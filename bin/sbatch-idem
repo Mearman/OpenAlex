@@ -1,0 +1,69 @@
+#!/bin/bash
+# sbatch-idem: idempotent sbatch wrapper for Slurm clusters.
+#
+# Usage: sbatch-idem <sbatch-script>
+#
+# Prevents duplicate job submissions by checking for existing jobs with the
+# same --job-name. Tracks script content via SHA-256 hash to detect changes.
+#
+# Three cases:
+#   1. No existing job        → submit, store hash, print job ID
+#   2. Existing job, same hash → skip (exit 0, print existing job ID)
+#   3. Existing job, new hash  → cancel old job, resubmit, update hash
+#
+# First-use with an existing job (no hash file yet) adopts the existing job
+# without cancelling, treating it as valid.
+#
+# Hash files are stored in ~/.sbatch-idem/<job-name>.hash
+
+set -euo pipefail
+
+SCRIPT="${1:?Usage: $0 <sbatch-script>}"
+
+# Extract job name from #SBATCH --job-name= directive
+JOB_NAME=$(grep '#SBATCH.*--job-name=' "$SCRIPT" | head -1 | sed 's/.*--job-name=//' | awk '{print $1}')
+if [ -z "$JOB_NAME" ]; then
+    echo "Error: no --job-name in $SCRIPT" >&2
+    exit 2
+fi
+
+HASH_DIR="$HOME/.sbatch-idem"
+mkdir -p "$HASH_DIR"
+SCRIPT_HASH=$(sha256sum "$SCRIPT" | awk '{print $1}')
+HASH_FILE="$HASH_DIR/$JOB_NAME.hash"
+
+# Check for existing job with the same name
+EXISTING=$(squeue -h -n "$JOB_NAME" -O "JobID:.10,State:.10" 2>/dev/null | head -1)
+if [ -n "$EXISTING" ]; then
+    JOB_ID=$(echo "$EXISTING" | awk '{print $1}')
+    STATE=$(echo "$EXISTING" | awk '{print $2}')
+
+    if [ -f "$HASH_FILE" ]; then
+        STORED_HASH=$(cat "$HASH_FILE")
+        if [ "$STORED_HASH" = "$SCRIPT_HASH" ]; then
+            echo "$JOB_NAME already $STATE (job $JOB_ID, hash unchanged)"
+            exit 0
+        else
+            echo "$JOB_NAME $STATE but script changed (${STORED_HASH:0:8} → ${SCRIPT_HASH:0:8}), cancelling $JOB_ID"
+            scancel "$JOB_ID" 2>/dev/null || true
+            sleep 2
+        fi
+    else
+        # First use with existing job: adopt without cancelling
+        echo "$JOB_NAME already $STATE (job $JOB_ID, adopting hash)"
+        echo "$SCRIPT_HASH" > "$HASH_FILE"
+        exit 0
+    fi
+fi
+
+# Submit
+OUT=$(sbatch "$SCRIPT" 2>&1)
+NEW_ID=$(echo "$OUT" | grep -oE 'Submitted batch job [0-9]+' | grep -oE '[0-9]+')
+if [ -z "$NEW_ID" ]; then
+    echo "Failed: $OUT" >&2
+    exit 1
+fi
+
+# Store hash
+echo "$SCRIPT_HASH" > "$HASH_FILE"
+echo "Submitted $JOB_NAME as job $NEW_ID (hash ${SCRIPT_HASH:0:12})"

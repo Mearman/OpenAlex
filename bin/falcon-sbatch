@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# falcon-sbatch: submit Slurm jobs on Falcon from the local machine.
+#
+# Usage: falcon-sbatch <local-script> [-- <extra-ssh-args>]
+#
+# Deploys the script to Falcon via SCP, then runs sbatch-idem for
+# idempotent submission. If a job with the same --job-name is already
+# pending or running (and the script hasn't changed), skips submission.
+#
+# The script MUST have #SBATCH --job-name= set.
+#
+# SSH routing:
+#   - Tries Tailscale (falcon, port 22) first
+#   - Falls back to BU jump host (bangor-gateway → falconlogin.cf.ac.uk)
+#   - Override with FALCON_SSH env var for custom routing
+#
+# Examples:
+#   falcon-sbatch sync_works.sh
+#   falcon-sbatch sync_works.sh -- -o ConnectTimeout=5
+#   FALCON_SSH="ssh -p 2222 falcon" falcon-sbatch sync_works.sh
+
+set -euo pipefail
+
+SCRIPT="${1:?Usage: $0 <local-script> [-- <extra-ssh-args>]}"
+shift
+
+# Collect extra SSH args after --
+SSH_ARGS=()
+if [ "${1:-}" = "--" ]; then
+    shift
+    SSH_ARGS=("$@")
+fi
+
+if [ ! -f "$SCRIPT" ]; then
+    echo "Error: $SCRIPT not found" >&2
+    exit 2
+fi
+
+# Determine SSH command
+if [ -n "${FALCON_SSH:-}" ]; then
+    SSH_CMD="$FALCON_SSH"
+elif timeout 3 ssh -o ConnectTimeout=2 falcon true 2>/dev/null; then
+    SSH_CMD="ssh"
+    SSH_TARGET="falcon"
+else
+    SSH_CMD="ssh -o ProxyCommand='ssh bangor-gateway -W %h:%p'"
+    SSH_TARGET="b.abs217@falconlogin.cf.ac.uk"
+fi
+
+SSH=($SSH_CMD "${SSH_ARGS[@]}" "$SSH_TARGET")
+
+# Remote base directory
+REMOTE_BASE="/scratch/SCWF00070/b.abs217"
+BASENAME=$(basename "$SCRIPT")
+REMOTE_SCRIPT="$REMOTE_BASE/$BASENAME"
+
+# Deploy script
+echo "Deploying $BASENAME → $REMOTE_SCRIPT"
+scp -o ProxyCommand="ssh bangor-gateway -W %h:%p" "$SCRIPT" "b.abs217@falconlogin.cf.ac.uk:$REMOTE_SCRIPT" 2>/dev/null \
+    || scp "$SCRIPT" "falcon:$REMOTE_SCRIPT" 2>/dev/null \
+    || { echo "Error: failed to deploy $SCRIPT" >&2; exit 1; }
+
+# Deploy sbatch-idem if not present on Falcon
+"${SSH[@]}" "test -x \$HOME/.local/bin/sbatch-idem || { mkdir -p \$HOME/.local/bin; cat > \$HOME/.local/bin/sbatch-idem << 'SBATCHIDEM'
+$(cat "$(dirname "$0")/sbatch-idem")
+SBATCHIDEM
+chmod +x \$HOME/.local/bin/sbatch-idem; }" 2>/dev/null
+
+# Run idempotent submission
+"${SSH[@]}" "bash \$HOME/.local/bin/sbatch-idem $REMOTE_SCRIPT"
