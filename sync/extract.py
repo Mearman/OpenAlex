@@ -58,6 +58,12 @@ _DEFAULT_WORKERS = 6
 _RAM_HEADROOM_GB = 2
 _RAM_PER_WORKER_GB = 6
 
+# Workers are I/O-bound (gzip decompress + JSON parse wait on disk), so we
+# allow oversubscription: more workers than allocated CPUs. A factor of 3x
+# means 16 allocated CPUs can run up to 48 workers if memory allows. The
+# factor is capped to avoid diminishing returns from context-switch overhead.
+_CPU_OVERSUBSCRIBE = 3
+
 
 def _get_memory_limit_bytes() -> int | None:
     """Return the process's memory limit in bytes, or None if unlimited.
@@ -130,11 +136,15 @@ def _get_cpu_count() -> int:
 
 
 def _auto_workers(reserve: int = 0) -> int:
-    """Pick an extraction worker count based on available RAM.
+    """Pick an extraction worker count based on available RAM and CPUs.
 
-    Workers are I/O-bound (gzip decompression + JSON parsing) rather than
-    CPU-bound, so the worker count is determined by memory alone: the job's
-    memory limit divided by the per-worker RAM budget. CPU count is not a cap.
+    Workers are I/O-bound (gzip decompression + JSON parsing spend most of
+    their time waiting on disk I/O), so the primary limit is memory: the job's
+    memory limit divided by the per-worker RAM budget.
+
+    CPU count is not a hard cap (workers aren't CPU-bound) but we cap at
+    ``_CPU_OVERSUBSCRIBE × allocated_cpus`` to avoid context-switch thrash
+    from runaway oversubscription on large-memory nodes.
 
     On Slurm-managed nodes, uses the JOB's memory limit (cgroup or
     SLURM_MEM_PER_NODE) rather than the node's total physical memory.
@@ -146,15 +156,16 @@ def _auto_workers(reserve: int = 0) -> int:
     to use without oversubscribing the allocation.
     """
     cpu_count = _get_cpu_count()
-    limit_bytes = _get_memory_limit_bytes()
+    cpu_cap = cpu_count * _CPU_OVERSUBSCRIBE
 
+    limit_bytes = _get_memory_limit_bytes()
     if limit_bytes is not None:
         limit_gb = limit_bytes / (1024 ** 3)
         by_ram = max(1, int((limit_gb - _RAM_HEADROOM_GB) // _RAM_PER_WORKER_GB))
-        chosen = max(1, by_ram - max(0, reserve))
+        chosen = max(1, min(cpu_cap, by_ram) - max(0, reserve))
         log.info(
-            "Auto-sized workers to %d (%.0fGB job limit, %d CPUs, %d reserved, RAM cap %d)",
-            chosen, limit_gb, cpu_count, reserve, by_ram,
+            "Auto-sized workers to %d (%.0fGB job limit, %d CPUs, %d reserved, RAM cap %d, CPU cap %d)",
+            chosen, limit_gb, cpu_count, reserve, by_ram, cpu_cap,
         )
         return chosen
 
@@ -173,10 +184,10 @@ def _auto_workers(reserve: int = 0) -> int:
 
     total_gb = total_bytes / (1024 ** 3)
     by_ram = max(1, int((total_gb - _RAM_HEADROOM_GB) // _RAM_PER_WORKER_GB))
-    chosen = max(1, by_ram - max(0, reserve))
+    chosen = max(1, min(cpu_cap, by_ram) - max(0, reserve))
     log.info(
-        "Auto-sized workers to %d (%.0fGB node RAM, %d CPUs, %d reserved, RAM cap %d)",
-        chosen, total_gb, cpu_count, reserve, by_ram,
+        "Auto-sized workers to %d (%.0fGB node RAM, %d CPUs, %d reserved, RAM cap %d, CPU cap %d)",
+        chosen, total_gb, cpu_count, reserve, by_ram, cpu_cap,
     )
     return chosen
 
