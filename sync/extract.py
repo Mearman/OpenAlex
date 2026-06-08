@@ -42,7 +42,12 @@ from sync.common import (
     format_size,
     _json_loads,
 )
-from sync.schema import EntitySchema, extract_relationships, get_entity_schema
+from sync.schema import (
+    EntitySchema,
+    canonical_schemas_from_source_dir,
+    extract_relationships,
+    get_entity_schema,
+)
 
 log = logging.getLogger("openalex-sync")
 
@@ -716,13 +721,18 @@ def _extract_one_source_file(
     """
     source_key = _source_file_key(source_file)
     schema = _entity_schema(entity_type)
+    arrow_schemas = _entity_arrow_schemas(entity_type)
 
-    # Open one writer per relationship type for this source file
+    # Open one writer per relationship type for this source file. Each writer is
+    # pinned to the relationship's canonical Arrow schema so every shard shares
+    # one stable, fully-typed column set regardless of which values this
+    # particular source file happens to contain.
     writers: dict[str, _SourceFileWriter] = {}
     for rt in rel_types:
         out_dir = rt_dir(output_base, rt)
         writers[rt] = _SourceFileWriter(
             out_dir, rt, source_key, staging_dir=staging_dir,
+            canonical_schema=arrow_schemas.get(rt),
         )
 
     buffers: dict[str, list[dict]] = {rt: [] for rt in rel_types}
@@ -789,9 +799,14 @@ class _SourceFileWriter:
         rel_type: str,
         source_key: str,
         staging_dir: Path | None = None,
+        canonical_schema: pa.Schema | None = None,
     ) -> None:
         self.rel_type = rel_type
-        self.schema: pa.Schema | None = None  # inferred from first batch
+        # The canonical schema (when supplied) pins the column set and types for
+        # every shard of this relationship table. It is only None for a rel_type
+        # absent from the probe sample, in which case the schema falls back to
+        # first-batch inference.
+        self.schema: pa.Schema | None = canonical_schema
         self.output_dir = output_dir
         self.staging_dir = staging_dir
         self.source_key = source_key
@@ -828,7 +843,21 @@ class _SourceFileWriter:
             self.schema = pa.schema(fields)
             return raw.cast(self.schema)
 
-        # Known schema — build column-at-a-time for better throughput
+        # Known schema — build column-at-a-time for better throughput. Missing
+        # keys resolve to typed nulls via row.get(); a key NOT in the schema is
+        # a column the probe sample never saw and would be silently dropped, so
+        # surface it loudly instead of losing data.
+        known = set(self.schema.names)
+        unexpected: set[str] = set()
+        for row in rows:
+            unexpected.update(row.keys() - known)
+        if unexpected:
+            raise RuntimeError(
+                f"rel_type={self.rel_type} source={self.source_key}: rows carry "
+                f"columns absent from the canonical schema: {sorted(unexpected)}. "
+                "The probe sample missed them — widen the sample or schema rather "
+                "than dropping data."
+            )
         try:
             return pa.Table.from_pydict(
                 {name: [row.get(name) for row in rows] for name in self.schema.names},
@@ -981,6 +1010,16 @@ def _entity_schema(entity: str) -> EntitySchema:
     # otherwise the probe mixes records from every entity and derives a schema
     # from whichever entity sorts first.
     return get_entity_schema(entity, source_dir=SNAPSHOT_DIR / entity)
+
+
+@lru_cache(maxsize=None)
+def _entity_arrow_schemas(entity: str) -> dict[str, pa.Schema]:
+    # Canonical per-relationship Arrow write schemas, derived once from a
+    # deterministic source sample so every shard of a relationship table shares
+    # one stable, fully-typed schema (see schema.build_canonical_schemas). The
+    # sampling matches the entity-scoped probe, so the result is identical in
+    # every worker process.
+    return canonical_schemas_from_source_dir(entity, SNAPSHOT_DIR / entity)
 
 
 def _extract_entity_relationships(

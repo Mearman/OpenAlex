@@ -21,6 +21,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+
 from sync.common import extract_id, iter_jsonl
 
 log = logging.getLogger(__name__)
@@ -1070,6 +1072,133 @@ def extract_relationships(
     return result
 
 
+# ── Canonical write schema ──────────────────────────────────────────────
+# The parquet writer must use one stable Arrow schema per relationship table
+# across every source shard, otherwise a column that is all-null (or absent) in
+# one shard is written with a degenerate null type while another shard writes it
+# typed — leaving the dataset schema-unstable file-to-file. That instability is
+# what forces DuckDB's union_by_name to widen everything to VARCHAR (destroying
+# nested list columns). Deriving the schema once, up front, from a sample fixes
+# it at the source.
+
+_ARROW_BY_NAME: dict[str, pa.DataType] = {
+    "str": pa.string(),
+    "int": pa.int64(),
+    "float": pa.float64(),
+    "bool": pa.bool_(),
+}
+
+
+def _scalar_type_name(value: Any) -> str | None:
+    """Type name for a non-null scalar; ``None`` for lists/dicts/None.
+
+    bool is checked before int because bool is an int subclass.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    return None
+
+
+class _ColumnTypeObservations:
+    """Accumulates the observed scalar types (and list-ness) of one column."""
+
+    __slots__ = ("is_list", "names")
+
+    def __init__(self) -> None:
+        self.is_list = False
+        self.names: set[str] = set()
+
+    def observe(self, value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, list):
+            self.is_list = True
+            for element in value:
+                name = _scalar_type_name(element)
+                if name is not None:
+                    self.names.add(name)
+            return
+        name = _scalar_type_name(value)
+        if name is not None:
+            self.names.add(name)
+
+    def arrow_type(self) -> pa.DataType:
+        # _widen_scalar_type collapses the observed set to one column type and
+        # defaults the all-null case to "str" — the same rule the main table
+        # uses, so scalar and relationship columns stay consistent.
+        base = _ARROW_BY_NAME[_widen_scalar_type(self.names)]
+        return pa.list_(base) if self.is_list else base
+
+
+def build_canonical_schemas(
+    schema: EntitySchema, records: list[dict[str, Any]],
+) -> dict[str, pa.Schema]:
+    """Build one stable Arrow schema per relationship table from a record sample.
+
+    Column names and types are observed by running the real extraction over the
+    sample, so they match the writer's output for every pattern — including the
+    dynamic ``generic_list`` flattening that cannot be enumerated statically.
+    The main table is additionally seeded from its declared ``scalar_cols`` so
+    columns that are all-null in the sample still get their declared type rather
+    than defaulting to string. Column order places the entity id column first.
+    """
+    observed: dict[str, dict[str, _ColumnTypeObservations]] = {}
+    order: dict[str, list[str]] = {}
+
+    def column(rel: str, col: str) -> _ColumnTypeObservations:
+        cols = observed.setdefault(rel, {})
+        obs = cols.get(col)
+        if obs is None:
+            obs = _ColumnTypeObservations()
+            cols[col] = obs
+            order.setdefault(rel, []).append(col)
+        return obs
+
+    # Seed the main table from declared scalar columns: the id column first,
+    # then every scalar column with its declared type. This guarantees the
+    # main table's full, correctly-typed column set regardless of the sample.
+    main_rel = f"{_singular(schema.entity)}_main"
+    column(main_rel, schema.id_col).names.add(schema.id_type)
+    for fs in schema.fields:
+        if fs.pattern == "scalar":
+            for sc in fs.scalar_cols:
+                column(main_rel, sc["col"]).names.add(sc["type"])
+
+    for record in records:
+        for rel, rows in extract_relationships(record, schema).items():
+            for row in rows:
+                for col, value in row.items():
+                    column(rel, col).observe(value)
+
+    return {
+        rel: pa.schema(
+            [pa.field(col, observed[rel][col].arrow_type()) for col in cols]
+        )
+        for rel, cols in order.items()
+    }
+
+
+def canonical_schemas_from_source_dir(
+    entity: str, source_dir: Path,
+) -> dict[str, pa.Schema]:
+    """Sample an entity's source shards and build its canonical write schemas.
+
+    Uses the same deterministic, evenly-spaced sampling as the schema probe, so
+    every worker derives an identical schema from an identical sample.
+    """
+    schema = get_entity_schema(entity, source_dir=source_dir)
+    records = _sample_source_records(entity, source_dir)
+    return build_canonical_schemas(schema, records)
+
+
 # ── Schema probe ────────────────────────────────────────────────────────
 # Infers an EntitySchema from a sample record. This is the only place
 # where per-entity knowledge exists — and it's expressed as generic
@@ -1780,11 +1909,13 @@ def _store_probe_cache(entity: str, key: str, schema: EntitySchema) -> None:
 # ── Schema probing from JSONL ───────────────────────────────────────────
 
 
-def _schema_from_source_dir(
-    entity: str,
-    source_dir: Path,
-    seed_schema: EntitySchema | None = None,
-) -> EntitySchema:
+def _sample_source_records(entity: str, source_dir: Path) -> list[dict[str, Any]]:
+    """Read a deterministic, evenly-spaced sample of records from an entity's
+    source shards.
+
+    Shared by the schema probe and the canonical write-schema builder so both
+    observe an identical sample (and therefore an identical schema).
+    """
     # Use os.walk with followlinks=True because pathlib's glob("**/*.gz")
     # does not traverse symlinked directories by default. This matters when
     # a worker stages a partition into the snapshot dir via a symlink to
@@ -1837,6 +1968,15 @@ def _schema_from_source_dir(
                 break
     if not records:
         raise RuntimeError(f"No readable records found for {entity} in {source_dir}")
+    return records
+
+
+def _schema_from_source_dir(
+    entity: str,
+    source_dir: Path,
+    seed_schema: EntitySchema | None = None,
+) -> EntitySchema:
+    records = _sample_source_records(entity, source_dir)
     return probe_schema_multi(entity, records, seed_schema=seed_schema)
 
 
