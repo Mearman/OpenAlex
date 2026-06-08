@@ -3202,7 +3202,7 @@
         {
           "is_singular_dict": true,
           "json_key": "abstract_inverted_index",
-          "pattern": "json_blob",
+          "pattern": "inverted_index",
           "rel_name": "work_abstracts"
         },
         {
