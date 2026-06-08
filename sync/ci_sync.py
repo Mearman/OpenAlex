@@ -145,7 +145,7 @@ def _probe_and_store_schema(entity: str, jsonl_path: Path) -> frozenset[str]:
     Probes from the actual JSONL data, writes the result to the committed
     schema file, and returns the discovered rel types.
     """
-    from sync.schema import probe_schema_from_file, _store_entity_schema
+    from sync.schema import _store_entity_schema, probe_schema_from_file
     schema = probe_schema_from_file(entity, jsonl_path)
     if schema is None:
         return frozenset()
