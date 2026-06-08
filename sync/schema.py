@@ -563,6 +563,86 @@ def _pattern_inverted_index(
     return {fs.rel_name: rows} if rows else {}
 
 
+def _pattern_generic_list(
+    entity_id: int,
+    items: list[dict],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: generic list of dicts → one row per item with all scalar fields.
+
+    Recursively extracts nested sub-lists as separate relationship tables
+    and flattens scalar leaves from nested dicts. Used as the fallback when
+    no specific pattern matches a list-of-dicts field.
+    """
+    result: dict[str, list[dict]] = {}
+    main_rows: list[dict[str, Any]] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        row: dict[str, Any] = {entity_id_col: entity_id}
+        _collect_scalar_leaves(item, row)
+        main_rows.append(row)
+
+        # Recursively extract nested sub-lists as separate relationship tables
+        for k, v in item.items():
+            if isinstance(v, list) and v:
+                if isinstance(v[0], dict):
+                    sub_rel = f"{fs.rel_name}_{k}"
+                    sub_rows: list[dict[str, Any]] = []
+                    for sub_item in v:
+                        if not isinstance(sub_item, dict):
+                            continue
+                        sr: dict[str, Any] = {entity_id_col: entity_id}
+                        _collect_scalar_leaves(sub_item, sr)
+                        sub_rows.append(sr)
+                    if sub_rows:
+                        result.setdefault(sub_rel, []).extend(sub_rows)
+
+    if main_rows:
+        result[fs.rel_name] = main_rows
+    return result
+
+
+def _collect_scalar_leaves(d: dict, row: dict, prefix: str = "") -> None:
+    """Flatten scalar values from a dict into row, recursing into sub-dicts.
+
+    Nested dicts are traversed with column names like "source_id", "source_display_name".
+    Non-scalar values (lists, nested complex structs) are skipped.
+    """
+    for k, v in d.items():
+        col = f"{prefix}_{k}" if prefix else k
+        if isinstance(v, (str, int, float, bool, type(None))):
+            row[col] = v
+        elif isinstance(v, dict):
+            _collect_scalar_leaves(v, row, prefix=col)
+
+
+def _collect_scalar_paths(
+    d: dict,
+    col_prefix: str,
+    path_prefix: str = "",
+) -> list[dict]:
+    """Collect scalar leaf paths from a dict, recursing into sub-dicts.
+
+    Returns a list of {col, path, type} dicts suitable for scalar_cols.
+    col_prefix is underscore-separated (open_access_source_id),
+    path_prefix is dot-separated (open_access.source.id).
+    """
+    if not path_prefix:
+        path_prefix = col_prefix
+    paths: list[dict] = []
+    for k, v in d.items():
+        col = f"{col_prefix}_{k}"
+        path = f"{path_prefix}.{k}"
+        if isinstance(v, (str, int, float, bool)):
+            paths.append({"col": col, "path": path, "type": _py_type_name(v)})
+        elif isinstance(v, dict):
+            paths.extend(_collect_scalar_paths(v, col, path))
+    return paths
+
+
 def _pattern_roles(
     entity_id: int,
     items: list[dict],
@@ -864,6 +944,7 @@ _PATTERN_DISPATCH: dict[str, Any] = {
     "string_list": _pattern_string_list,
     "json_blob": _pattern_json_blob,
     "inverted_index": _pattern_inverted_index,
+    "generic_list": _pattern_generic_list,
     "roles": _pattern_roles,
     "topic_share": _pattern_topic_share,
     "taxonomy_parent": _pattern_taxonomy_parent,
@@ -923,7 +1004,13 @@ def extract_relationships(
             if not (field_rels & wanted):
                 continue
 
-        value = record.get(fs.json_key)
+        # Resolve the field value. Dotted json_keys (e.g. "open_access.license")
+        # are resolved from nested dicts; plain keys use direct lookup.
+        value = (
+            _resolve_nested(record, fs.json_key)
+            if "." in fs.json_key
+            else record.get(fs.json_key)
+        )
 
         # Handle None / empty
         if value is None:
@@ -1156,22 +1243,25 @@ def _classify_field(
             )
             fields.append(inv_fs)
         # Otherwise: a metadata wrapper dict (biblio, open_access, geo,
-        # summary_stats, citation_normalized_percentile, …). Flatten its scalar
-        # leaves into main-table columns named "{key}_{subkey}". Sub-dicts and
-        # sub-lists inside the wrapper are not relationships of this entity and
-        # are dropped. Only applies when no specific dict handler matched above.
+        # summary_stats, citation_normalized_percentile, …). Flatten ALL scalar
+        # leaves — including those nested inside sub-dicts — into main-table
+        # columns named "{key}_{subkey}_{subsubkey}". Nested sub-lists of dicts
+        # become separate relationship tables.
         if not fields:
-            scalar_cols = [
-                {"col": f"{key}_{sk}", "path": f"{key}.{sk}", "type": _py_type_name(sv)}
-                for sk, sv in value.items()
-                if isinstance(sv, (str, int, float, bool))
-            ]
+            scalar_cols = _collect_scalar_paths(value, key)
             if scalar_cols:
                 fields.append(FieldSchema(
                     json_key=key, pattern="scalar",
                     rel_name=f"{sing}_main",
                     scalar_cols=scalar_cols,
                 ))
+            # Nested sub-lists → separate relationship tables
+            for sk, sv in value.items():
+                if isinstance(sv, list) and sv and isinstance(sv[0], dict):
+                    fields.append(FieldSchema(
+                        json_key=f"{key}.{sk}", pattern="generic_list",
+                        rel_name=f"{rel_prefix}{key}_{sk}",
+                    ))
         return fields
 
     # ── List values ──
@@ -1375,6 +1465,15 @@ def _classify_field(
                         extra_cols=extra,
                     ))
                 return fields
+
+            # Fallback: generic relationship table. Extracts all scalar fields
+            # from each dict item, flattens sub-dict scalars, and recursively
+            # extracts nested sub-lists as separate relationship tables.
+            fields.append(FieldSchema(
+                json_key=key, pattern="generic_list",
+                rel_name=f"{rel_prefix}{key}",
+            ))
+            return fields
 
         return fields
 
