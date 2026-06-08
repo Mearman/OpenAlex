@@ -949,6 +949,15 @@ def sync_shards(
         for r in results:
             f.write(json.dumps(r) + "\n")
 
+    # Regenerate README with dataset viewer configs from the updated schema.
+    # This is a lightweight single-file upload, separate from the data upload.
+    try:
+        from sync.readme import generate_readme, update_readme_on_hf
+        generate_readme()  # validates generation
+        update_readme_on_hf()
+    except Exception as exc:
+        print(f"WARNING: README regeneration failed (non-fatal): {exc}")
+
     never_uploaded = succeeded - uploaded_count
     print(f"Done: {succeeded} succeeded, {failed} failed, {never_uploaded} never uploaded out of {total}")
     if failed > 0 or never_uploaded > 0:

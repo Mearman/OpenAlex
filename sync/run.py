@@ -136,6 +136,22 @@ def _sync_git_refs() -> None:
     log("Git refs synced")
 
 
+def _regenerate_readme() -> None:
+    """Regenerate README.md from the schema and write it to the sync root."""
+    from sync.readme import generate_readme, update_readme_on_hf
+
+    readme = generate_readme()
+    # Write locally so git sees it
+    readme_path = SYNC_ROOT / "README.md"
+    readme_path.write_text(readme)
+    log(f"README regenerated at {readme_path}")
+    # Upload to HF separately (upload_large_folder only handles data files)
+    try:
+        update_readme_on_hf()
+    except Exception as exc:
+        log(f"README upload failed (non-fatal): {exc}")
+
+
 def cmd_upload(args, *, workers: int | None = None) -> None:
     """Reconcile the HuggingFace dataset's parquet files with the local set.
 
@@ -358,6 +374,13 @@ def main():
 
     log("=== extract (sources → Parquet) ===")
     cmd_extract(args)
+
+    # Generate README with dataset viewer configs from the schema.
+    # Runs after extraction so the schema reflects the final data, and
+    # before upload so the new README is pushed with the data.
+    if not args.no_upload:
+        log("=== readme (regenerate dataset viewer configs) ===")
+        _regenerate_readme()
 
     # Stop overlapping uploads before the final reconcile so nothing runs two
     # upload_large_folder passes at once.
