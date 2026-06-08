@@ -541,6 +541,28 @@ def _pattern_json_blob(
     return {fs.rel_name: [{entity_id_col: entity_id, fs.json_key: blob}]}
 
 
+def _pattern_inverted_index(
+    entity_id: int,
+    items: dict[str, Any],
+    fs: FieldSchema,
+    entity_id_col: str,
+) -> dict[str, list[dict]]:
+    """Pattern: abstract inverted index → one row per word.
+
+    The inverted index is a dict mapping word → list of token positions.
+    Exploded into (entity_id, word, positions) rows so the data is typed
+    and queryable rather than stored as a JSON blob.
+    """
+    rows: list[dict] = []
+    for word, positions in items.items():
+        rows.append({
+            entity_id_col: entity_id,
+            "word": word,
+            "positions": positions,
+        })
+    return {fs.rel_name: rows} if rows else {}
+
+
 def _pattern_roles(
     entity_id: int,
     items: list[dict],
@@ -841,6 +863,7 @@ _PATTERN_DISPATCH: dict[str, Any] = {
     "external_ids": _pattern_external_ids,
     "string_list": _pattern_string_list,
     "json_blob": _pattern_json_blob,
+    "inverted_index": _pattern_inverted_index,
     "roles": _pattern_roles,
     "topic_share": _pattern_topic_share,
     "taxonomy_parent": _pattern_taxonomy_parent,
@@ -985,7 +1008,7 @@ def _add_empty_list_field(
     #   - "issn" → issn pattern
     #   - "counts_by_year" → time_series
     #   - "ids" → external_ids
-    #   - "abstract_inverted_index" → json_blob
+    #   - "abstract_inverted_index" → inverted_index
     #   - "funded_outputs" / url-like → url_list
     #   - "grants" → grants
     #   - "awards" → awards
@@ -1010,7 +1033,7 @@ def _add_empty_list_field(
         ))
     elif key == "abstract_inverted_index":
         fields.append(FieldSchema(
-            json_key=key, pattern="json_blob", rel_name=f"{rel_prefix}abstracts",
+            json_key=key, pattern="inverted_index", rel_name=f"{rel_prefix}abstracts",
             is_singular_dict=True,
         ))
     elif key == "funded_outputs":
@@ -1100,7 +1123,7 @@ def _classify_field(
                 ))
         elif key == "abstract_inverted_index":
             fields.append(FieldSchema(
-                json_key="abstract_inverted_index", pattern="json_blob",
+                json_key="abstract_inverted_index", pattern="inverted_index",
                 rel_name=f"{rel_prefix}abstracts",
                 is_singular_dict=True,
             ))
