@@ -53,7 +53,14 @@ log = logging.getLogger("openalex-sync")
 
 # ── Batch thresholds ────────────────────────────────────────────────────
 
-_BATCH_SIZE = 4_000_000
+# Rows buffered per relationship table before a parquet row-group flush. Kept
+# modest because each worker holds one buffer per relationship type and the
+# huge late-dated source shards (millions of records, abstract rows carrying
+# position lists) made a multi-million-row buffer OOM-kill a worker — which in
+# turn deadlocks the multiprocessing pool and can truncate the shard being
+# written. 500k keeps peak memory bounded while still producing healthy row
+# groups.
+_BATCH_SIZE = 500_000
 _PROGRESS_INTERVAL = 1_000_000
 _DEFAULT_WORKERS = 6
 
