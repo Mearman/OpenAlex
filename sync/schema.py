@@ -1172,6 +1172,16 @@ def build_canonical_schemas(
             for sc in fs.scalar_cols:
                 column(main_rel, sc["col"]).names.add(sc["type"])
 
+    # Seed every declared relationship table with the entity id column so a
+    # table absent from the sample (e.g. a deprecated, always-empty one like
+    # concept counts_by_year) still gets a stable id-only schema rather than
+    # leaving its empty shards to fall back to the _placeholder marker. If such
+    # a table does carry data in some record, the extra columns are observed
+    # below; if it carries data the sample never saw, the writer's
+    # unexpected-column guard surfaces it loudly.
+    for rel in schema.rel_type_names():
+        column(rel, schema.id_col).names.add(schema.id_type)
+
     for record in records:
         for rel, rows in extract_relationships(record, schema).items():
             for row in rows:
