@@ -1259,7 +1259,12 @@ def convert_relationships(
         _rt_dir = rt_dir(_output_dir, rt)
         create_output_dir(_rt_dir)
 
-        local_completed = completed_source_keys(_rt_dir)
+        # Under --force the user wants every unit re-extracted regardless of
+        # provenance, so no source file counts as already complete — otherwise
+        # the existing shards on disk make `pending` empty and force becomes a
+        # no-op (it only bypasses the manifest-drift gate above, not this
+        # file-level skip). hf_completed is already emptied under force.
+        local_completed = set() if force else completed_source_keys(_rt_dir)
         completed = local_completed | hf_completed.get(rt, set())
         pending = _compute_pending_source_files(source_files, completed)
 
