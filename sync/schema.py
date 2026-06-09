@@ -887,20 +887,30 @@ def _pattern_locations(
     fs: FieldSchema,
     entity_id_col: str,
 ) -> dict[str, list[dict]]:
-    """Pattern: location dicts with source.id + metadata."""
+    """Pattern: location dicts → source.id plus every scalar metadata field.
+
+    Captures the source link as ``source_id`` and then every scalar leaf of the
+    location (``is_oa``, ``is_accepted``, ``is_published``, ``license``,
+    ``license_id``, ``pdf_url``, ``version`` …) rather than a hardcoded subset,
+    so new OpenAlex location fields are picked up automatically. Locations
+    without a source are still emitted (their metadata is real). The ``source``
+    dict, the skip-listed keys, and ``raw_*`` projections are excluded.
+    """
     rows: list[dict] = []
     for loc in items:
+        if not isinstance(loc, dict):
+            continue
         source = loc.get("source") or {}
-        source_id = extract_id(source.get("id"))
-        if source_id is not None:
-            rows.append({
-                entity_id_col: entity_id,
-                "source_id": source_id,
-                "is_oa": bool(loc.get("is_oa", False)),
-                "is_primary": bool(loc.get("is_primary", False)),
-                "license": loc.get("license"),
-                "version": loc.get("version"),
-            })
+        row: dict[str, Any] = {
+            entity_id_col: entity_id,
+            "source_id": extract_id(source.get("id")),
+        }
+        for k, v in loc.items():
+            if k in ("source", "id") or k in _SKIP_NESTED_KEYS or k.startswith("raw_"):
+                continue
+            if isinstance(v, (str, int, float, bool)):
+                row[k] = v
+        rows.append(row)
     return {fs.rel_name: rows} if rows else {}
 
 
@@ -1551,11 +1561,25 @@ def _classify_field(
                 isinstance(v, dict) and "id" in v
                 for v in first.values()
             ):
-                # Determine extra scalar columns
+                # Determine extra columns: every scalar field, plus lists whose
+                # elements are scalars (e.g. an affiliation's ``years``) — these
+                # are carried as native list columns so the data isn't dropped.
+                # Dicts and lists-of-dicts are excluded (the former are id
+                # sub-dicts, the latter become nested relationship tables).
+                def _is_scalar(x: Any) -> bool:
+                    return isinstance(x, (str, int, float, bool))
+
+                def _is_scalar_list(x: Any) -> bool:
+                    return (
+                        isinstance(x, list)
+                        and len(x) > 0
+                        and all(_is_scalar(e) for e in x if e is not None)
+                    )
+
                 extra = [
                     k for k in first
                     if k != "id"
-                    and not isinstance(first.get(k), (list, dict))
+                    and (_is_scalar(first.get(k)) or _is_scalar_list(first.get(k)))
                     and not k.startswith("raw_")
                     and k not in {"display_name", "wikidata"}
                 ]
