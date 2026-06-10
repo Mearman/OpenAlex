@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -1767,7 +1768,14 @@ def probe_schema_multi(
 
 # ── Committed schema file ──────────────────────────────────────────────
 
-_SCHEMA_FILE_VERSION = 1
+# Bump this whenever the probe/extraction logic changes what columns a schema
+# produces. Both the committed schema file and the on-disk probe cache record
+# the version they were written with and are rejected on load if it no longer
+# matches, so a logic change automatically invalidates stale caches instead of
+# silently shadowing the new behaviour (the source-file hash alone can't catch
+# a code change). v2: locations capture all scalar leaves; relationship probes
+# carry lists-of-scalars as native list columns.
+_SCHEMA_FILE_VERSION = 2
 _SCHEMA_FILE = Path(__file__).resolve().parent.parent / "openalex.schema.json"
 _PROBE_SAMPLE_SIZE = 100  # records sampled per file
 _PROBE_SAMPLE_FILES = 25  # files sampled, evenly spaced across the date range
@@ -1805,9 +1813,27 @@ def _write_schema_file(cache: dict[str, dict[str, Any]]) -> None:
         "version": _SCHEMA_FILE_VERSION,
         "entities": cache,
     }
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(path)
+    # Unique temp file per writer (not a shared "<path>.tmp") so concurrent
+    # workers that all cache-miss and re-probe at once can't clobber each
+    # other's temp and fail the rename. Failures are logged, not raised, so a
+    # best-effort cache update never aborts the run.
+    tmp_path: str | None = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(path.parent), prefix=".openalex.schema.", suffix=".tmp",
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except OSError as exc:
+        log.warning("Cannot write schema file %s: %s", path, exc)
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     _load_schema_file.cache_clear()
 
 
@@ -1905,6 +1931,11 @@ def _load_probe_cache(entity: str, key: str) -> EntitySchema | None:
         return None
     if payload.get("cache_key") != key or payload.get("entity") != entity:
         return None
+    # Reject caches written by a different probe-logic version — the source-file
+    # hash is unchanged across a code change, so without this a stale cache would
+    # shadow the updated extraction behaviour.
+    if payload.get("version") != _SCHEMA_FILE_VERSION:
+        return None
     schema_dict = payload.get("schema")
     if not isinstance(schema_dict, dict):
         return None
@@ -1929,15 +1960,28 @@ def _store_probe_cache(entity: str, key: str, schema: EntitySchema) -> None:
         "cache_key": key,
         "schema": schema.to_dict(),
     }
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    # Write to a unique temp file, then atomically rename onto the final path.
+    # A shared "<path>.tmp" would let concurrent writers (e.g. a forked
+    # extraction pool that all cache-miss at once) clobber each other's temp and
+    # fail the rename with FileNotFoundError. Every writer produces the same
+    # schema, so a per-writer temp plus last-writer-wins rename is safe.
+    tmp_path: str | None = None
     try:
-        tmp_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True),
-            encoding="utf-8",
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(_PROBE_CACHE_DIR), prefix=f"schema_{entity}_", suffix=".tmp",
         )
-        tmp_path.replace(path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
+        tmp_path = None
     except OSError as exc:
         log.warning("Cannot write schema probe cache %s: %s", path, exc)
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 # ── Schema probing from JSONL ───────────────────────────────────────────

@@ -1318,6 +1318,12 @@ def convert_relationships(
         " + ".join(all_pending_types),
     )
 
+    # Build the canonical write schemas once, here in the parent, before forking
+    # the pool. Workers inherit the populated lru cache across fork, so they
+    # never re-probe (which would have every worker sample the source and race
+    # to rewrite the shared schema-probe cache).
+    _entity_arrow_schemas(entity_type)
+
     # Distribute files across workers — each worker processes all types
     actual_workers = min(n_workers, len(files_to_process))
     actual_workers = max(1, actual_workers)
