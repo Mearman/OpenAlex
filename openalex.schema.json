@@ -26,9 +26,9 @@
         },
         {
           "extra_cols": [
-            "cited_by_count",
+            "works_count",
             "oa_works_count",
-            "works_count"
+            "cited_by_count"
           ],
           "json_key": "counts_by_year",
           "pattern": "time_series",
@@ -71,13 +71,39 @@
         },
         {
           "extra_cols": [
+            "ror",
+            "country_code",
+            "type",
+            "lineage"
+          ],
+          "id_path": "id",
+          "json_key": "last_known_institutions",
+          "pattern": "id_ref",
+          "rel_name": "author_last_known_institutions"
+        },
+        {
+          "json_key": "orcid",
+          "pattern": "scalar",
+          "rel_name": "author_main",
+          "scalar_cols": [
+            {
+              "col": "orcid",
+              "path": "orcid",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "extra_cols": [
+            "issn_l",
+            "issn",
+            "is_oa",
+            "is_in_doaj",
+            "is_core",
             "host_organization",
             "host_organization_name",
-            "is_core",
-            "is_in_doaj",
-            "is_oa",
-            "issn",
-            "issn_l",
+            "host_organization_lineage",
+            "host_organization_lineage_names",
             "type"
           ],
           "id_path": "id",
@@ -106,6 +132,20 @@
               "type": "int"
             }
           ]
+        },
+        {
+          "json_key": "topic_share",
+          "pattern": "topic_share",
+          "rel_name": "author_topic_share"
+        },
+        {
+          "extra_cols": [
+            "count"
+          ],
+          "id_path": "subfield.id",
+          "json_key": "topics",
+          "pattern": "nested_id_ref",
+          "rel_name": "author_topics"
         },
         {
           "json_key": "updated_date",
@@ -145,52 +185,14 @@
         },
         {
           "extra_cols": [
-            "count",
             "level",
-            "score"
+            "score",
+            "count"
           ],
           "id_path": "id",
           "json_key": "x_concepts",
           "pattern": "id_ref",
           "rel_name": "author_x_concepts"
-        },
-        {
-          "extra_cols": [
-            "country_code",
-            "lineage",
-            "ror",
-            "type"
-          ],
-          "id_path": "id",
-          "json_key": "last_known_institutions",
-          "pattern": "id_ref",
-          "rel_name": "author_last_known_institutions"
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "author_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "author_topics"
-        },
-        {
-          "json_key": "orcid",
-          "pattern": "scalar",
-          "rel_name": "author_main",
-          "scalar_cols": [
-            {
-              "col": "orcid",
-              "path": "orcid",
-              "type": "str"
-            }
-          ]
         }
       ],
       "id_col": "author_id",
@@ -256,6 +258,18 @@
             {
               "col": "display_name",
               "path": "display_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "doi",
+          "pattern": "scalar",
+          "rel_name": "award_main",
+          "scalar_cols": [
+            {
+              "col": "doi",
+              "path": "doi",
               "type": "str"
             }
           ]
@@ -345,6 +359,18 @@
           ]
         },
         {
+          "json_key": "investigators",
+          "nested": [
+            {
+              "json_key": "affiliation",
+              "pattern": "investigators",
+              "rel_name": "award_investigator_affiliations"
+            }
+          ],
+          "pattern": "investigators",
+          "rel_name": "award_investigators"
+        },
+        {
           "json_key": "landing_page_url",
           "pattern": "scalar",
           "rel_name": "award_main",
@@ -432,30 +458,6 @@
               "type": "str"
             }
           ]
-        },
-        {
-          "json_key": "doi",
-          "pattern": "scalar",
-          "rel_name": "award_main",
-          "scalar_cols": [
-            {
-              "col": "doi",
-              "path": "doi",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "investigators",
-          "nested": [
-            {
-              "json_key": "affiliation",
-              "pattern": "investigators",
-              "rel_name": "award_investigator_affiliations"
-            }
-          ],
-          "pattern": "investigators",
-          "rel_name": "award_investigators"
         }
       ],
       "id_col": "award_id",
@@ -479,9 +481,9 @@
         },
         {
           "extra_cols": [
+            "works_count",
             "cited_by_count",
-            "oa_works_count",
-            "works_count"
+            "oa_works_count"
           ],
           "json_key": "counts_by_year",
           "pattern": "time_series",
@@ -495,6 +497,18 @@
             {
               "col": "created_date",
               "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
               "type": "str"
             }
           ]
@@ -516,6 +530,30 @@
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "concept_external_ids"
+        },
+        {
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "concept_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "level",
@@ -574,42 +612,6 @@
               "col": "works_count",
               "path": "works_count",
               "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "description",
-          "pattern": "scalar",
-          "rel_name": "concept_main",
-          "scalar_cols": [
-            {
-              "col": "description",
-              "path": "description",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "image_thumbnail_url",
-          "pattern": "scalar",
-          "rel_name": "concept_main",
-          "scalar_cols": [
-            {
-              "col": "image_thumbnail_url",
-              "path": "image_thumbnail_url",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "image_url",
-          "pattern": "scalar",
-          "rel_name": "concept_main",
-          "scalar_cols": [
-            {
-              "col": "image_url",
-              "path": "image_url",
-              "type": "str"
             }
           ]
         }
@@ -751,6 +753,18 @@
               "col": "authors_api_url",
               "path": "authors_api_url",
               "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "cited_by_count",
+          "pattern": "scalar",
+          "rel_name": "countrie_main",
+          "scalar_cols": [
+            {
+              "col": "cited_by_count",
+              "path": "cited_by_count",
+              "type": "int"
             }
           ]
         },
@@ -925,18 +939,6 @@
               "col": "works_api_url",
               "path": "works_api_url",
               "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "cited_by_count",
-          "pattern": "scalar",
-          "rel_name": "countrie_main",
-          "scalar_cols": [
-            {
-              "col": "cited_by_count",
-              "path": "cited_by_count",
-              "type": "int"
             }
           ]
         },
@@ -1240,9 +1242,9 @@
         },
         {
           "extra_cols": [
-            "cited_by_count",
+            "works_count",
             "oa_works_count",
-            "works_count"
+            "cited_by_count"
           ],
           "json_key": "counts_by_year",
           "pattern": "time_series",
@@ -1256,6 +1258,18 @@
             {
               "col": "created_date",
               "path": "created_date",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "description",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "description",
+              "path": "description",
               "type": "str"
             }
           ]
@@ -1289,6 +1303,30 @@
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "funder_external_ids"
+        },
+        {
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "funder_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "roles",
@@ -1338,42 +1376,6 @@
               "col": "works_count",
               "path": "works_count",
               "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "description",
-          "pattern": "scalar",
-          "rel_name": "funder_main",
-          "scalar_cols": [
-            {
-              "col": "description",
-              "path": "description",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "image_thumbnail_url",
-          "pattern": "scalar",
-          "rel_name": "funder_main",
-          "scalar_cols": [
-            {
-              "col": "image_thumbnail_url",
-              "path": "image_thumbnail_url",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "image_url",
-          "pattern": "scalar",
-          "rel_name": "funder_main",
-          "scalar_cols": [
-            {
-              "col": "image_url",
-              "path": "image_url",
-              "type": "str"
             }
           ]
         }
@@ -1467,10 +1469,10 @@
       "fields": [
         {
           "extra_cols": [
-            "country_code",
-            "relationship",
             "ror",
-            "type"
+            "country_code",
+            "type",
+            "relationship"
           ],
           "id_path": "id",
           "json_key": "associated_institutions",
@@ -1503,9 +1505,9 @@
         },
         {
           "extra_cols": [
-            "cited_by_count",
+            "works_count",
             "oa_works_count",
-            "works_count"
+            "cited_by_count"
           ],
           "json_key": "counts_by_year",
           "pattern": "time_series",
@@ -1561,6 +1563,11 @@
               "type": "str"
             },
             {
+              "col": "geo_region",
+              "path": "geo.region",
+              "type": "str"
+            },
+            {
               "col": "geo_country_code",
               "path": "geo.country_code",
               "type": "str"
@@ -1601,6 +1608,30 @@
           "rel_name": "institution_external_ids"
         },
         {
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "institution_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
           "json_key": "is_super_system",
           "pattern": "scalar",
           "rel_name": "institution_main",
@@ -1616,6 +1647,17 @@
           "json_key": "lineage",
           "pattern": "url_list",
           "rel_name": "institution_lineage"
+        },
+        {
+          "extra_cols": [
+            "host_organization",
+            "host_organization_name",
+            "host_organization_lineage"
+          ],
+          "id_path": "id",
+          "json_key": "repositories",
+          "pattern": "id_ref",
+          "rel_name": "institution_repositories"
         },
         {
           "json_key": "roles",
@@ -1667,6 +1709,21 @@
               "type": "int"
             }
           ]
+        },
+        {
+          "json_key": "topic_share",
+          "pattern": "topic_share",
+          "rel_name": "institution_topic_share"
+        },
+        {
+          "extra_cols": [
+            "count",
+            "score"
+          ],
+          "id_path": "subfield.id",
+          "json_key": "topics",
+          "pattern": "nested_id_ref",
+          "rel_name": "institution_topics"
         },
         {
           "json_key": "type",
@@ -1727,56 +1784,6 @@
               "type": "int"
             }
           ]
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "institution_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count",
-            "score"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "institution_topics"
-        },
-        {
-          "json_key": "image_thumbnail_url",
-          "pattern": "scalar",
-          "rel_name": "institution_main",
-          "scalar_cols": [
-            {
-              "col": "image_thumbnail_url",
-              "path": "image_thumbnail_url",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "image_url",
-          "pattern": "scalar",
-          "rel_name": "institution_main",
-          "scalar_cols": [
-            {
-              "col": "image_url",
-              "path": "image_url",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "extra_cols": [
-            "host_organization",
-            "host_organization_lineage",
-            "host_organization_name"
-          ],
-          "id_path": "id",
-          "json_key": "repositories",
-          "pattern": "id_ref",
-          "rel_name": "institution_repositories"
         }
       ],
       "id_col": "institution_id",
@@ -2074,8 +2081,8 @@
         },
         {
           "extra_cols": [
-            "cited_by_count",
-            "works_count"
+            "works_count",
+            "cited_by_count"
           ],
           "json_key": "counts_by_year",
           "pattern": "time_series",
@@ -2118,10 +2125,46 @@
           ]
         },
         {
+          "json_key": "homepage_url",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "homepage_url",
+              "path": "homepage_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
           "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "publisher_external_ids"
+        },
+        {
+          "json_key": "image_thumbnail_url",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "image_thumbnail_url",
+              "path": "image_thumbnail_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "image_url",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "image_url",
+              "path": "image_url",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "lineage",
@@ -2129,9 +2172,28 @@
           "rel_name": "publisher_lineage"
         },
         {
+          "id_path": "id",
+          "is_singular_dict": true,
+          "json_key": "parent_publisher",
+          "pattern": "taxonomy_parent",
+          "rel_name": "publisher_parent_publishers"
+        },
+        {
           "json_key": "roles",
           "pattern": "roles",
           "rel_name": "publisher_roles"
+        },
+        {
+          "json_key": "ror_id",
+          "pattern": "scalar",
+          "rel_name": "publisher_main",
+          "scalar_cols": [
+            {
+              "col": "ror_id",
+              "path": "ror_id",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "sources_api_url",
@@ -2202,61 +2264,6 @@
               "type": "int"
             }
           ]
-        },
-        {
-          "json_key": "homepage_url",
-          "pattern": "scalar",
-          "rel_name": "publisher_main",
-          "scalar_cols": [
-            {
-              "col": "homepage_url",
-              "path": "homepage_url",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "ror_id",
-          "pattern": "scalar",
-          "rel_name": "publisher_main",
-          "scalar_cols": [
-            {
-              "col": "ror_id",
-              "path": "ror_id",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "image_thumbnail_url",
-          "pattern": "scalar",
-          "rel_name": "publisher_main",
-          "scalar_cols": [
-            {
-              "col": "image_thumbnail_url",
-              "path": "image_thumbnail_url",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "image_url",
-          "pattern": "scalar",
-          "rel_name": "publisher_main",
-          "scalar_cols": [
-            {
-              "col": "image_url",
-              "path": "image_url",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "id_path": "id",
-          "is_singular_dict": true,
-          "json_key": "parent_publisher",
-          "pattern": "taxonomy_parent",
-          "rel_name": "publisher_parent_publishers"
         }
       ],
       "id_col": "publisher_id",
@@ -2479,6 +2486,18 @@
           "rel_name": "source_apc_prices"
         },
         {
+          "json_key": "apc_usd",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "apc_usd",
+              "path": "apc_usd",
+              "type": "int"
+            }
+          ]
+        },
+        {
           "json_key": "cited_by_count",
           "pattern": "scalar",
           "rel_name": "source_main",
@@ -2491,14 +2510,38 @@
           ]
         },
         {
+          "json_key": "country_code",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "country_code",
+              "path": "country_code",
+              "type": "str"
+            }
+          ]
+        },
+        {
           "extra_cols": [
-            "cited_by_count",
+            "works_count",
             "oa_works_count",
-            "works_count"
+            "cited_by_count"
           ],
           "json_key": "counts_by_year",
           "pattern": "time_series",
           "rel_name": "source_counts_by_year"
+        },
+        {
+          "json_key": "created_date",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "created_date",
+              "path": "created_date",
+              "type": "str"
+            }
+          ]
         },
         {
           "json_key": "display_name",
@@ -2513,10 +2556,68 @@
           ]
         },
         {
+          "json_key": "first_publication_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "first_publication_year",
+              "path": "first_publication_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "homepage_url",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "homepage_url",
+              "path": "homepage_url",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "host_organization",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "host_organization",
+              "path": "host_organization",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "host_organization_lineage",
+          "pattern": "url_list",
+          "rel_name": "source_host_organization_lineage"
+        },
+        {
+          "json_key": "host_organization_name",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "host_organization_name",
+              "path": "host_organization_name",
+              "type": "str"
+            }
+          ]
+        },
+        {
           "is_singular_dict": true,
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "source_external_ids"
+        },
+        {
+          "json_key": "issn",
+          "pattern": "issn",
+          "rel_name": "source_issns"
         },
         {
           "json_key": "is_core",
@@ -2543,6 +2644,18 @@
           ]
         },
         {
+          "json_key": "is_high_oa_rate_since_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_high_oa_rate_since_year",
+              "path": "is_high_oa_rate_since_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
           "json_key": "is_in_doaj",
           "pattern": "scalar",
           "rel_name": "source_main",
@@ -2551,6 +2664,18 @@
               "col": "is_in_doaj",
               "path": "is_in_doaj",
               "type": "bool"
+            }
+          ]
+        },
+        {
+          "json_key": "is_in_doaj_since_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "is_in_doaj_since_year",
+              "path": "is_in_doaj_since_year",
+              "type": "int"
             }
           ]
         },
@@ -2591,9 +2716,40 @@
           ]
         },
         {
-          "json_key": "issn",
-          "pattern": "issn",
-          "rel_name": "source_issns"
+          "json_key": "issn_l",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "issn_l",
+              "path": "issn_l",
+              "type": "str"
+            }
+          ]
+        },
+        {
+          "json_key": "last_publication_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "last_publication_year",
+              "path": "last_publication_year",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "oa_flip_year",
+          "pattern": "scalar",
+          "rel_name": "source_main",
+          "scalar_cols": [
+            {
+              "col": "oa_flip_year",
+              "path": "oa_flip_year",
+              "type": "int"
+            }
+          ]
         },
         {
           "json_key": "oa_works_count",
@@ -2633,6 +2789,20 @@
               "type": "int"
             }
           ]
+        },
+        {
+          "json_key": "topic_share",
+          "pattern": "topic_share",
+          "rel_name": "source_topic_share"
+        },
+        {
+          "extra_cols": [
+            "count"
+          ],
+          "id_path": "subfield.id",
+          "json_key": "topics",
+          "pattern": "nested_id_ref",
+          "rel_name": "source_topics"
         },
         {
           "json_key": "type",
@@ -2681,169 +2851,6 @@
               "type": "int"
             }
           ]
-        },
-        {
-          "json_key": "homepage_url",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "homepage_url",
-              "path": "homepage_url",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "country_code",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "country_code",
-              "path": "country_code",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "issn_l",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "issn_l",
-              "path": "issn_l",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "first_publication_year",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "first_publication_year",
-              "path": "first_publication_year",
-              "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "last_publication_year",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "last_publication_year",
-              "path": "last_publication_year",
-              "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "is_in_doaj_since_year",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "is_in_doaj_since_year",
-              "path": "is_in_doaj_since_year",
-              "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "oa_flip_year",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "oa_flip_year",
-              "path": "oa_flip_year",
-              "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "apc_usd",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "apc_usd",
-              "path": "apc_usd",
-              "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "host_organization",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "host_organization",
-              "path": "host_organization",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "host_organization_lineage",
-          "pattern": "url_list",
-          "rel_name": "source_host_organization_lineage"
-        },
-        {
-          "json_key": "host_organization_name",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "host_organization_name",
-              "path": "host_organization_name",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "is_high_oa_rate_since_year",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "is_high_oa_rate_since_year",
-              "path": "is_high_oa_rate_since_year",
-              "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "created_date",
-          "pattern": "scalar",
-          "rel_name": "source_main",
-          "scalar_cols": [
-            {
-              "col": "created_date",
-              "path": "created_date",
-              "type": "str"
-            }
-          ]
-        },
-        {
-          "json_key": "topic_share",
-          "pattern": "topic_share",
-          "rel_name": "source_topic_share"
-        },
-        {
-          "extra_cols": [
-            "count"
-          ],
-          "id_path": "subfield.id",
-          "json_key": "topics",
-          "pattern": "nested_id_ref",
-          "rel_name": "source_topics"
         }
       ],
       "id_col": "source_id",
@@ -3211,6 +3218,50 @@
           "rel_name": "work_abstracts"
         },
         {
+          "json_key": "apc_list",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "apc_list_value",
+              "path": "apc_list.value",
+              "type": "int"
+            },
+            {
+              "col": "apc_list_currency",
+              "path": "apc_list.currency",
+              "type": "str"
+            },
+            {
+              "col": "apc_list_value_usd",
+              "path": "apc_list.value_usd",
+              "type": "int"
+            }
+          ]
+        },
+        {
+          "json_key": "apc_paid",
+          "pattern": "scalar",
+          "rel_name": "work_main",
+          "scalar_cols": [
+            {
+              "col": "apc_paid_value",
+              "path": "apc_paid.value",
+              "type": "float"
+            },
+            {
+              "col": "apc_paid_currency",
+              "path": "apc_paid.currency",
+              "type": "str"
+            },
+            {
+              "col": "apc_paid_value_usd",
+              "path": "apc_paid.value_usd",
+              "type": "float"
+            }
+          ]
+        },
+        {
           "json_key": "authors_count",
           "pattern": "scalar",
           "rel_name": "work_main",
@@ -3400,6 +3451,15 @@
           ]
         },
         {
+          "extra_cols": [
+            "ror"
+          ],
+          "id_path": "id",
+          "json_key": "funders",
+          "pattern": "id_ref",
+          "rel_name": "work_funders"
+        },
+        {
           "json_key": "fwci",
           "pattern": "scalar",
           "rel_name": "work_main",
@@ -3445,6 +3505,11 @@
           "json_key": "ids",
           "pattern": "external_ids",
           "rel_name": "work_external_ids"
+        },
+        {
+          "json_key": "indexed_in",
+          "pattern": "string_list",
+          "rel_name": "work_indexed_in"
         },
         {
           "json_key": "institutions_distinct_count",
@@ -3534,6 +3599,11 @@
           ]
         },
         {
+          "json_key": "mesh",
+          "pattern": "mesh",
+          "rel_name": "work_mesh"
+        },
+        {
           "json_key": "open_access",
           "pattern": "scalar",
           "rel_name": "work_main",
@@ -3585,6 +3655,11 @@
           ]
         },
         {
+          "json_key": "referenced_works",
+          "pattern": "url_list",
+          "rel_name": "work_referenced_works"
+        },
+        {
           "json_key": "referenced_works_count",
           "pattern": "scalar",
           "rel_name": "work_main",
@@ -3595,6 +3670,20 @@
               "type": "int"
             }
           ]
+        },
+        {
+          "json_key": "related_works",
+          "pattern": "url_list",
+          "rel_name": "work_related_works"
+        },
+        {
+          "extra_cols": [
+            "score"
+          ],
+          "id_path": "id",
+          "json_key": "sustainable_development_goals",
+          "pattern": "id_ref",
+          "rel_name": "work_sustainable_development_goals"
         },
         {
           "json_key": "title",
@@ -3640,88 +3729,6 @@
               "type": "str"
             }
           ]
-        },
-        {
-          "json_key": "indexed_in",
-          "pattern": "string_list",
-          "rel_name": "work_indexed_in"
-        },
-        {
-          "json_key": "related_works",
-          "pattern": "url_list",
-          "rel_name": "work_related_works"
-        },
-        {
-          "json_key": "referenced_works",
-          "pattern": "url_list",
-          "rel_name": "work_referenced_works"
-        },
-        {
-          "json_key": "apc_list",
-          "pattern": "scalar",
-          "rel_name": "work_main",
-          "scalar_cols": [
-            {
-              "col": "apc_list_value",
-              "path": "apc_list.value",
-              "type": "int"
-            },
-            {
-              "col": "apc_list_currency",
-              "path": "apc_list.currency",
-              "type": "str"
-            },
-            {
-              "col": "apc_list_value_usd",
-              "path": "apc_list.value_usd",
-              "type": "int"
-            }
-          ]
-        },
-        {
-          "json_key": "mesh",
-          "pattern": "mesh",
-          "rel_name": "work_mesh"
-        },
-        {
-          "extra_cols": [
-            "score"
-          ],
-          "id_path": "id",
-          "json_key": "sustainable_development_goals",
-          "pattern": "id_ref",
-          "rel_name": "work_sustainable_development_goals"
-        },
-        {
-          "extra_cols": [
-            "ror"
-          ],
-          "id_path": "id",
-          "json_key": "funders",
-          "pattern": "id_ref",
-          "rel_name": "work_funders"
-        },
-        {
-          "json_key": "apc_paid",
-          "pattern": "scalar",
-          "rel_name": "work_main",
-          "scalar_cols": [
-            {
-              "col": "apc_paid_value",
-              "path": "apc_paid.value",
-              "type": "float"
-            },
-            {
-              "col": "apc_paid_currency",
-              "path": "apc_paid.currency",
-              "type": "str"
-            },
-            {
-              "col": "apc_paid_value_usd",
-              "path": "apc_paid.value_usd",
-              "type": "float"
-            }
-          ]
         }
       ],
       "id_col": "work_id",
@@ -3729,5 +3736,5 @@
       "id_type": "int"
     }
   },
-  "version": 2
+  "version": 3
 }
