@@ -1654,6 +1654,47 @@ def probe_schema(
     return probe_schema_multi(entity, [record], seed_schema=seed_schema)
 
 
+def _representative_value(values: list[Any]) -> Any:
+    """Collapse every real value observed for one key across sampled records
+    into a single synthetic value carrying the UNION of structure seen.
+
+    Classifying a field from one record misses sub-fields that are null or
+    absent there but populated elsewhere (an institution's ``lineage`` list, a
+    source's ``issn``) — the cause of columns flickering in and out of the
+    schema between probe runs. Merging makes discovery exhaustive over the
+    sample and deterministic: dicts become the deep union of their keys, and a
+    list of dicts becomes a one-element list holding the merged element, so
+    downstream shape heuristics and ``extra_cols`` discovery see every leaf.
+    """
+    non_null = [v for v in values if v is not None]
+    if not non_null:
+        return values[0] if values else None
+    if all(isinstance(v, dict) for v in non_null):
+        keys: list[str] = []
+        seen: set[str] = set()
+        for v in non_null:
+            for k in v:
+                if k not in seen:
+                    seen.add(k)
+                    keys.append(k)
+        return {
+            k: _representative_value([v[k] for v in non_null if k in v])
+            for k in keys
+        }
+    if all(isinstance(v, list) for v in non_null):
+        elements = [e for v in non_null for e in v]
+        dict_elems = [e for e in elements if isinstance(e, dict)]
+        if dict_elems:
+            return [_representative_value(dict_elems)]
+        non_null_elems = [e for e in elements if e is not None]
+        if not non_null_elems:
+            return []
+        # Scalar elements: keep a few real samples for URL/ISSN heuristics.
+        return non_null_elems[:5]
+    # Scalars (or mixed shapes, which OpenAlex doesn't produce): representative.
+    return non_null[0]
+
+
 def probe_schema_multi(
     entity: str,
     records: list[dict],
@@ -1690,35 +1731,31 @@ def probe_schema_multi(
     for record in records:
         all_keys.update(record.keys())
 
-    seen_json_keys: dict[str, FieldSchema] = {}
-    classified_real: set[str] = set()   # record keys classified from real data
-    classified_empty: set[str] = set()  # record keys classified from null/empty
-
+    # Gather every real (non-empty) value seen for each key across all sampled
+    # records, plus a representative empty sample for keys only ever seen empty.
+    # Real data takes precedence over an empty observation for the same key.
+    key_real_values: dict[str, list[Any]] = {}
+    key_empty_sample: dict[str, Any] = {}
     for record in records:
-        for key in sorted(record.keys()):
-            value = record[key]
+        for key, value in record.items():
             is_empty = value is None or (
                 isinstance(value, (list, dict)) and len(value) == 0
             )
             if is_empty:
-                # Classify an empty value only if this key has never been seen
-                # with real data nor already heuristically classified. Real data
-                # observed later for the same key takes precedence.
-                if key in classified_real or key in classified_empty:
-                    continue
-                new_fields = _classify_field(key, value, entity, all_keys)
-                seen_json_keys.update({f.json_key: f for f in new_fields})
-                classified_empty.add(key)
+                key_empty_sample.setdefault(key, value)
             else:
-                # Real data always (re)classifies, overriding any prior
-                # null-sample heuristic placeholder for this key, then locks
-                # the key so later records skip re-classification.
-                if key in classified_real:
-                    continue
-                new_fields = _classify_field(key, value, entity, all_keys)
-                seen_json_keys.update({f.json_key: f for f in new_fields})
-                classified_real.add(key)
-                classified_empty.discard(key)
+                key_real_values.setdefault(key, []).append(value)
+
+    # Classify each key exactly once from a structure-complete representative
+    # value, so a field sparse or absent in any single record is never missed.
+    seen_json_keys: dict[str, FieldSchema] = {}
+    for key in sorted(all_keys):
+        if key in key_real_values:
+            value = _representative_value(key_real_values[key])
+        else:
+            value = key_empty_sample.get(key)
+        new_fields = _classify_field(key, value, entity, all_keys)
+        seen_json_keys.update({f.json_key: f for f in new_fields})
 
     observed_fields = list(seen_json_keys.values())
 
@@ -1775,8 +1812,10 @@ def probe_schema_multi(
 # matches, so a logic change automatically invalidates stale caches instead of
 # silently shadowing the new behaviour (the source-file hash alone can't catch
 # a code change). v2: locations capture all scalar leaves; relationship probes
-# carry lists-of-scalars as native list columns.
-_SCHEMA_FILE_VERSION = 2
+# carry lists-of-scalars as native list columns. v3: field discovery merges all
+# sampled records into one structure-complete representative value per key, so
+# sparse fields (e.g. institution lineage) are no longer missed by chance.
+_SCHEMA_FILE_VERSION = 3
 _SCHEMA_FILE = Path(__file__).resolve().parent.parent / "openalex.schema.json"
 _PROBE_SAMPLE_SIZE = 100  # records sampled per file
 _PROBE_SAMPLE_FILES = 25  # files sampled, evenly spaced across the date range
