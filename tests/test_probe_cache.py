@@ -86,4 +86,6 @@ class TestConcurrentWriteSafe:
         # the old code would have failed to write it (and logged a warning).
         loaded = schema._load_probe_cache("widgets", "key0")
         assert loaded is not None and loaded.entity == "widgets"
-        assert not list(cache_dir.glob("schema_widgets_key0.*.tmp")), "temp not cleaned up"
+        # No leftover unique temp *files* (the blocking dir is excluded).
+        leftover = [p for p in cache_dir.glob("schema_widgets_*.tmp") if p.is_file()]
+        assert not leftover, f"temp not cleaned up: {leftover}"
