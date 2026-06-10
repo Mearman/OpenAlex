@@ -1582,6 +1582,7 @@ def _classify_field(
                     if k != "id"
                     and (_is_scalar(first.get(k)) or _is_scalar_list(first.get(k)))
                     and not k.startswith("raw_")
+                    and k not in _SKIP_NESTED_KEYS
                     and k not in {"display_name", "wikidata"}
                 ]
 
