@@ -117,6 +117,15 @@ def _yaml_dump_configs(configs: list[dict]) -> str:
 
 _BODY = r"""pretty_name: OpenAlex Snapshot
 license: cc0-1.0
+papers:
+- https://arxiv.org/abs/2205.01833
+annotations_creators:
+- found
+- machine-generated
+language_creators:
+- found
+source_datasets:
+- original
 tags:
 - academic
 - scholarly-metadata
