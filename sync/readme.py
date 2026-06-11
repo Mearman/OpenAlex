@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from sync.common import SYNC_ROOT
+from sync.common import SYNC_ROOT, nested_rt_path
 
 # The schema lives in the OpenAlex repo alongside sync/, not inside the
 # snapshot data root (which may be a plain folder on an external drive).
@@ -82,9 +82,14 @@ def _generate_configs(schema: dict) -> list[dict]:
             rel = field.get("rel_name")
             if rel and rel not in seen_rels:
                 seen_rels.add(rel)
+                # The data lives where extraction wrote it: rt_dir uses
+                # nested_rt_path(rel) = "{entity_plural}/{subtable}" (e.g.
+                # author_sources -> authors/sources), NOT "{entity}/{rel}".
+                # Using the literal rel_name produced data/authors/author_sources
+                # which matches no files, breaking the dataset viewer.
                 configs.append({
                     "config_name": f"{entity_name}__{rel}",
-                    "data_files": [{"split": "train", "path": f"data/{dir_name}/{rel}/*.parquet"}],
+                    "data_files": [{"split": "train", "path": f"data/{nested_rt_path(rel)}/*.parquet"}],
                 })
 
         # Source config for every entity
