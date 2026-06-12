@@ -208,19 +208,26 @@ def _build_csr_duckdb(
     src_col: str,
     tgt_col: str,
     memory_limit: str | None = None,
-) -> sparse.csr_matrix:
+) -> tuple[sparse.csr_matrix, dict[int, int]]:
     """Build a CSR matrix from parquet shards using DuckDB.
 
-    DuckDB reads all shards in parallel, deduplicates edges, and
-    produces sorted (src, tgt) pairs directly — no Python sorting
-    needed.  This is ~50-100x faster than the legacy .adj.gz path
-    for large relationships (work_references: ~3B rows).
+    Returns (csr_matrix, id_map) where id_map maps compact indices
+    back to original OpenAlex IDs.
+
+    OpenAlex IDs are sparse (up to ~7B) so we remap them to a dense
+    contiguous range [0, n_unique_nodes) to keep the indptr array
+    small. The remapping is deterministic: sorted by original ID.
+
+    DuckDB reads all shards, deduplicates edges, and produces sorted
+    (src, tgt) pairs directly — no Python sorting needed.  This is
+    ~50-100x faster than the legacy .adj.gz path for large
+    relationships (work_references: ~3B rows).
     """
     if duckdb is None:
         raise ImportError("duckdb is required for CSR building")
 
     if not parquet_files:
-        return sparse.csr_matrix((0, 0), dtype=np.float64)
+        return sparse.csr_matrix((0, 0), dtype=np.float64), {}
 
     # Build glob pattern for DuckDB to read all shards
     shard_dir = parquet_files[0].parent
@@ -234,11 +241,12 @@ def _build_csr_duckdb(
         # Use single thread for deterministic output ordering
         con.execute("SET threads=1")
 
-        # Read all shards, deduplicate, and sort deterministically
+        # Read all shards, deduplicate, and sort deterministically.
+        # Use UBIGINT (uint64) — OpenAlex IDs exceed uint32 range (4.3B).
         query = f"""
             SELECT
-                CAST("{src_col}" AS UINTEGER) AS src,
-                CAST("{tgt_col}" AS UINTEGER) AS tgt
+                CAST("{src_col}" AS UBIGINT) AS src,
+                CAST("{tgt_col}" AS UBIGINT) AS tgt
             FROM read_parquet('{glob_pattern}')
             WHERE "{src_col}" IS NOT NULL
               AND "{tgt_col}" IS NOT NULL
@@ -251,29 +259,43 @@ def _build_csr_duckdb(
         con.close()
 
     if not result:
-        return sparse.csr_matrix((0, 0), dtype=np.float64)
+        return sparse.csr_matrix((0, 0), dtype=np.float64), {}
 
-    # Convert to numpy arrays
-    pairs = np.array(result, dtype=np.uint32)
+    # Convert to numpy arrays (uint64 — IDs exceed uint32)
+    pairs = np.array(result, dtype=np.uint64)
     sources = pairs[:, 0]
     targets = pairs[:, 1]
     n_edges = len(sources)
 
-    # Determine matrix dimension (max node ID + 1)
-    max_node = int(max(sources.max(), targets.max())) + 1
+    # Collect all unique node IDs and map to dense range [0, N).
+    # Deterministic: sorted by original ID.
+    all_ids = np.unique(np.concatenate([sources, targets]))
+    n_nodes = len(all_ids)
+    id_to_idx: dict[int, int] = {int(oid): idx for idx, oid in enumerate(all_ids)}
+    del all_ids  # free memory
+
+    # Remap to dense indices
+    dense_src = np.array([id_to_idx[int(s)] for s in sources], dtype=np.int64)
+    dense_tgt = np.array([id_to_idx[int(t)] for t in targets], dtype=np.int64)
+    del pairs, sources, targets
 
     # Build CSR indptr (row pointers)
-    indptr = np.zeros(max_node + 1, dtype=np.int64)
-    np.add.at(indptr, sources + 1, 1)
+    indptr = np.zeros(n_nodes + 1, dtype=np.int64)
+    np.add.at(indptr, dense_src + 1, 1)
     np.cumsum(indptr, out=indptr)
 
     # Data array (all ones for unweighted)
     data = np.ones(n_edges, dtype=np.float64)
 
-    return sparse.csr_matrix(
-        (data, targets.astype(np.int64), indptr),
-        shape=(max_node, max_node),
+    csr = sparse.csr_matrix(
+        (data, dense_tgt, indptr),
+        shape=(n_nodes, n_nodes),
     )
+
+    # Inverse map: compact index -> original ID
+    idx_to_id = {idx: oid for oid, idx in id_to_idx.items()}
+
+    return csr, idx_to_id
 
 
 def build_csr(
@@ -325,13 +347,18 @@ def build_csr(
     )
     t0 = time.time()
 
-    csr = _build_csr_duckdb(
+    csr, idx_to_id = _build_csr_duckdb(
         parquet_files, src_col, tgt_col,
         memory_limit=memory_limit,
     )
 
+    n_edges = csr.nnz
+    n_nodes = csr.shape[0]
+
     # Atomic write: temp file then os.replace
     _output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write CSR matrix
     fd, tmp_path = tempfile.mkstemp(
         dir=_output_dir, prefix=".tmp-", suffix=".npz"
     )
@@ -347,8 +374,23 @@ def build_csr(
             pass
         raise
 
-    n_edges = csr.nnz
-    n_nodes = csr.shape[0]
+    # Write ID mapping (compact index -> original OpenAlex ID)
+    id_map_path = output_path.with_suffix(".id_map.json")
+    fd2, tmp_id = tempfile.mkstemp(
+        dir=_output_dir, prefix=".tmp-id-", suffix=".json"
+    )
+    try:
+        with os.fdopen(fd2, "w", encoding="utf-8") as f:
+            # Store as list (index = compact, value = original ID)
+            id_list = [idx_to_id[i] for i in range(n_nodes)]
+            json.dump(id_list, f)
+        os.replace(tmp_id, id_map_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_id)
+        except OSError:
+            pass
+        raise
 
     _write_provenance(
         output_path,
