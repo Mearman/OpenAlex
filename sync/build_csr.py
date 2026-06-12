@@ -314,7 +314,7 @@ def _build_csr_duckdb(
         original_ids = pq.read_table(
             str(tmp_ids), columns=["id"]
         ).column("id").to_numpy()
-        del tmp_ids  # no longer needed
+        tmp_ids = None  # file read; finally block will not re-delete
 
         # Step 4: Read edges in chunks, remap to dense indices via
         # binary search (original_ids is sorted), and accumulate CSR
