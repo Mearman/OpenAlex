@@ -7,9 +7,8 @@ for fast aggregation. Output files are written to ``OPENALEX_CSR_DIR``
 
 Design constraints
 ------------------
-**Deterministic**: explicit ``ORDER BY src, tgt`` in DuckDB queries;
-sorted shard list; fixed DuckDB thread count.  Byte-identical output
-given the same input parquets.
+**Deterministic**: explicit ``ORDER BY`` in DuckDB queries; sorted
+shard list.  Byte-identical output given the same input parquets.
 
 **Idempotent**: provenance ``.json`` records input shard hashes
 (SHA-256 of sorted filenames + aggregate row count).  Skips
@@ -19,10 +18,17 @@ relationship types whose inputs are unchanged unless ``--force``.
 replaced with ``os.replace`` (atomic on POSIX).  Orphan temp files
 from interrupted runs are cleaned up at startup.
 
+**Memory-bounded**: DuckDB writes intermediate results (unique IDs,
+deduplicated edges) to temporary parquet files, which are read back in
+chunks via pyarrow.  This avoids materialising the full edge set in
+Python — ``work_referenced_works`` alone has ~3B deduplicated edges
+(~48 GB as raw uint64 pairs), far exceeding what ``fetchall()`` can
+handle.  Peak Python memory is bounded by the batch size plus the CSR
+index arrays.
+
 **Platform-independent**: env vars ``OPENALEX_PARQUET_DIR`` and
-``OPENALEX_CSR_DIR`` control paths.  DuckDB ``SET memory_limit`` and
-``SET threads`` honour the host.  No GPU, no MPI, no platform
-branching.
+``OPENALEX_CSR_DIR`` control paths.  DuckDB ``SET memory_limit``
+honours the host.  No GPU, no MPI, no platform branching.
 """
 
 from __future__ import annotations
@@ -44,6 +50,11 @@ try:
     import duckdb
 except ImportError:
     duckdb = None  # type: ignore[assignment]
+
+try:
+    import pyarrow.parquet as pq
+except ImportError:
+    pq = None  # type: ignore[assignment]
 
 from sync.common import SNAPSHOT_DIR, rt_dir
 
@@ -177,7 +188,9 @@ def _clean_orphan_temps(output_dir: Path) -> None:
         return
     for p in output_dir.iterdir():
         name = p.name
-        if name.startswith(".tmp-") or name.startswith(".prov-"):
+        if (name.startswith(".tmp-") or name.startswith(".prov-")
+                or name.endswith(".tmp_ids.parquet")
+                or name.endswith(".tmp_edges.parquet")):
             try:
                 p.unlink()
                 log.debug("Cleaned orphan temp: %s", name)
@@ -207,95 +220,152 @@ def _build_csr_duckdb(
     parquet_files: list[Path],
     src_col: str,
     tgt_col: str,
+    *,
     memory_limit: str | None = None,
-) -> tuple[sparse.csr_matrix, dict[int, int]]:
-    """Build a CSR matrix from parquet shards using DuckDB.
+    output_path: Path,
+) -> tuple[sparse.csr_matrix, np.ndarray]:
+    """Build a CSR matrix from parquet shards using DuckDB + pyarrow.
 
-    Returns (csr_matrix, id_map) where id_map maps compact indices
-    back to original OpenAlex IDs.
+    Returns (csr_matrix, original_ids) where ``original_ids`` is a sorted
+    numpy uint64 array whose index is the dense node index and whose value
+    is the original OpenAlex ID.
 
     OpenAlex IDs are sparse (up to ~7B) so we remap them to a dense
     contiguous range [0, n_unique_nodes) to keep the indptr array
-    small. The remapping is deterministic: sorted by original ID.
+    small.  The remapping is deterministic: sorted by original ID.
 
-    DuckDB reads all shards, deduplicates edges, and produces sorted
-    (src, tgt) pairs directly — no Python sorting needed.  This is
-    ~50-100x faster than the legacy .adj.gz path for large
-    relationships (work_references: ~3B rows).
+    DuckDB reads all shards, deduplicates edges, and writes intermediate
+    results to temporary parquet files.  Python reads these in chunks via
+    pyarrow, keeping peak memory bounded regardless of edge count.
+    ``work_referenced_works`` (~3B deduplicated edges) fits in 64 GB
+    with this approach, where ``fetchall()`` needed ~240 GB.
     """
     if duckdb is None:
         raise ImportError("duckdb is required for CSR building")
+    if pq is None:
+        raise ImportError("pyarrow is required for CSR building")
 
     if not parquet_files:
-        return sparse.csr_matrix((0, 0), dtype=np.float64), {}
+        return sparse.csr_matrix((0, 0), dtype=np.float64), np.array([], dtype=np.uint64)
 
-    # Build glob pattern for DuckDB to read all shards
     shard_dir = parquet_files[0].parent
     glob_pattern = str(shard_dir / "*.parquet")
+    tmp_ids = output_path.with_suffix(".tmp_ids.parquet")
+    tmp_edges = output_path.with_suffix(".tmp_edges.parquet")
 
-    con = duckdb.connect(":memory:")
     try:
-        if memory_limit:
-            con.execute(f"SET memory_limit='{memory_limit}'")
+        con = duckdb.connect(":memory:")
+        try:
+            if memory_limit:
+                con.execute(f"SET memory_limit='{memory_limit}'")
 
-        # Use single thread for deterministic output ordering
-        con.execute("SET threads=1")
+            # Step 1: Collect all unique node IDs, sorted deterministically.
+            # DuckDB spills to disk if the set exceeds memory_limit.
+            log.info("Collecting unique node IDs...")
+            con.execute(f"""
+                COPY (
+                    WITH all_ids AS (
+                        SELECT DISTINCT CAST("{src_col}" AS UBIGINT) AS id
+                        FROM read_parquet('{glob_pattern}')
+                        WHERE "{src_col}" IS NOT NULL
+                        UNION ALL
+                        SELECT DISTINCT CAST("{tgt_col}" AS UBIGINT) AS id
+                        FROM read_parquet('{glob_pattern}')
+                        WHERE "{tgt_col}" IS NOT NULL
+                    )
+                    SELECT DISTINCT id
+                    FROM all_ids
+                    ORDER BY id
+                ) TO '{tmp_ids}' (FORMAT PARQUET)
+            """)
+            n_nodes = con.execute(
+                f"SELECT COUNT(*) FROM read_parquet('{tmp_ids}')"
+            ).fetchone()[0]
+            log.info("Unique nodes: %d", n_nodes)
 
-        # Read all shards, deduplicate, and sort deterministically.
-        # Use UBIGINT (uint64) — OpenAlex IDs exceed uint32 range (4.3B).
-        query = f"""
-            SELECT
-                CAST("{src_col}" AS UBIGINT) AS src,
-                CAST("{tgt_col}" AS UBIGINT) AS tgt
-            FROM read_parquet('{glob_pattern}')
-            WHERE "{src_col}" IS NOT NULL
-              AND "{tgt_col}" IS NOT NULL
-            GROUP BY src, tgt
-            ORDER BY src ASC, tgt ASC
-        """
-        result = con.execute(query).fetchall()
+            # Step 2: Deduplicated edges sorted by (src, tgt).
+            # Still using original IDs — remapping happens in Python.
+            log.info("Deduplicating and sorting edges...")
+            con.execute(f"""
+                COPY (
+                    SELECT DISTINCT
+                        CAST("{src_col}" AS UBIGINT) AS src,
+                        CAST("{tgt_col}" AS UBIGINT) AS tgt
+                    FROM read_parquet('{glob_pattern}')
+                    WHERE "{src_col}" IS NOT NULL
+                      AND "{tgt_col}" IS NOT NULL
+                    ORDER BY src, tgt
+                ) TO '{tmp_edges}' (FORMAT PARQUET)
+            """)
+            n_edges = con.execute(
+                f"SELECT COUNT(*) FROM read_parquet('{tmp_edges}')"
+            ).fetchone()[0]
+            log.info("Deduplicated edges: %d", n_edges)
+
+        finally:
+            con.close()
+
+        if n_edges == 0:
+            return sparse.csr_matrix((0, 0), dtype=np.float64), np.array([], dtype=np.uint64)
+
+        # Step 3: Read the sorted unique IDs — this is the dense mapping.
+        # original_ids[dense_idx] = original OpenAlex ID.
+        # ~2 GB for 250M nodes (uint64), well within memory.
+        original_ids = pq.read_table(
+            str(tmp_ids), columns=["id"]
+        ).column("id").to_numpy()
+        del tmp_ids  # no longer needed
+
+        # Step 4: Read edges in chunks, remap to dense indices via
+        # binary search (original_ids is sorted), and accumulate CSR
+        # components.  Peak memory per batch: ~80 MB (5M rows × 16 bytes).
+        indptr = np.zeros(n_nodes + 1, dtype=np.int64)
+        indices_chunks: list[np.ndarray] = []
+        batch_count = 0
+
+        pf = pq.ParquetFile(str(tmp_edges))
+        for batch in pf.iter_batches(batch_size=5_000_000):
+            src = batch.column("src").to_numpy()
+            tgt = batch.column("tgt").to_numpy()
+
+            # Dense remap via binary search (monotone mapping).
+            # Since original_ids is sorted and edges are sorted by
+            # (src, tgt), the resulting (src_idx, tgt_idx) are also
+            # sorted — no re-sorting needed.
+            src_idx = np.searchsorted(original_ids, src).astype(np.int32)
+            tgt_idx = np.searchsorted(original_ids, tgt).astype(np.int32)
+
+            indices_chunks.append(tgt_idx)
+
+            # Count edges per source node for indptr construction.
+            counts = np.bincount(src_idx, minlength=n_nodes)
+            indptr[1:] += counts
+
+            batch_count += 1
+            log.debug("Processed batch %d (%d rows)", batch_count, len(src))
+
+        # Build CSR indptr (cumulative sum of per-row edge counts).
+        np.cumsum(indptr, out=indptr)
+
+        indices = np.concatenate(indices_chunks)
+        del indices_chunks
+
+        data = np.ones(n_edges, dtype=np.float64)
+        csr = sparse.csr_matrix(
+            (data, indices, indptr),
+            shape=(n_nodes, n_nodes),
+        )
+
+        return csr, original_ids
 
     finally:
-        con.close()
-
-    if not result:
-        return sparse.csr_matrix((0, 0), dtype=np.float64), {}
-
-    # Convert to numpy arrays (uint64 — IDs exceed uint32)
-    pairs = np.array(result, dtype=np.uint64)
-    sources = pairs[:, 0]
-    targets = pairs[:, 1]
-    n_edges = len(sources)
-
-    # Collect all unique node IDs and map to dense range [0, N).
-    # Deterministic: sorted by original ID.
-    all_ids = np.unique(np.concatenate([sources, targets]))
-    n_nodes = len(all_ids)
-    id_to_idx: dict[int, int] = {int(oid): idx for idx, oid in enumerate(all_ids)}
-    del all_ids  # free memory
-
-    # Remap to dense indices
-    dense_src = np.array([id_to_idx[int(s)] for s in sources], dtype=np.int64)
-    dense_tgt = np.array([id_to_idx[int(t)] for t in targets], dtype=np.int64)
-    del pairs, sources, targets
-
-    # Build CSR indptr (row pointers)
-    indptr = np.zeros(n_nodes + 1, dtype=np.int64)
-    np.add.at(indptr, dense_src + 1, 1)
-    np.cumsum(indptr, out=indptr)
-
-    # Data array (all ones for unweighted)
-    data = np.ones(n_edges, dtype=np.float64)
-
-    csr = sparse.csr_matrix(
-        (data, dense_tgt, indptr),
-        shape=(n_nodes, n_nodes),
-    )
-
-    # Inverse map: compact index -> original ID
-    idx_to_id = {idx: oid for oid, idx in id_to_idx.items()}
-
-    return csr, idx_to_id
+        # Clean up temp parquet files
+        for tmp in [tmp_ids, tmp_edges]:
+            if tmp is not None:
+                try:
+                    Path(tmp).unlink()
+                except OSError:
+                    pass
 
 
 def build_csr(
@@ -347,18 +417,18 @@ def build_csr(
     )
     t0 = time.time()
 
-    csr, idx_to_id = _build_csr_duckdb(
+    _output_dir.mkdir(parents=True, exist_ok=True)
+
+    csr, original_ids = _build_csr_duckdb(
         parquet_files, src_col, tgt_col,
         memory_limit=memory_limit,
+        output_path=output_path,
     )
 
     n_edges = csr.nnz
     n_nodes = csr.shape[0]
 
-    # Atomic write: temp file then os.replace
-    _output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write CSR matrix
+    # Write CSR matrix (atomic: temp file then os.replace)
     fd, tmp_path = tempfile.mkstemp(
         dir=_output_dir, prefix=".tmp-", suffix=".npz"
     )
@@ -374,16 +444,17 @@ def build_csr(
             pass
         raise
 
-    # Write ID mapping (compact index -> original OpenAlex ID)
-    id_map_path = output_path.with_suffix(".id_map.json")
+    # Write ID mapping as numpy array (index = dense, value = original ID).
+    # Uses .npy format — orders of magnitude faster than JSON for large
+    # node sets (250M nodes → ~2 GB .npy vs ~5 GB JSON, and no Python
+    # dict overhead).
+    id_map_path = output_path.with_suffix(".id_map.npy")
     fd2, tmp_id = tempfile.mkstemp(
-        dir=_output_dir, prefix=".tmp-id-", suffix=".json"
+        dir=_output_dir, prefix=".tmp-id-", suffix=".npy"
     )
     try:
-        with os.fdopen(fd2, "w", encoding="utf-8") as f:
-            # Store as list (index = compact, value = original ID)
-            id_list = [idx_to_id[i] for i in range(n_nodes)]
-            json.dump(id_list, f)
+        os.close(fd2)
+        np.save(tmp_id, original_ids)
         os.replace(tmp_id, id_map_path)
     except BaseException:
         try:
