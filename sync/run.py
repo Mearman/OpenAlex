@@ -191,15 +191,15 @@ def _hf_upload_pass(repo_id: str, num_workers: int) -> None:
         repo_id=repo_id,
         folder_path=str(SYNC_ROOT),
         repo_type="dataset",
-        allow_patterns=["*.parquet", "*.jsonl.gz"],
+        allow_patterns=["*.parquet", "*.jsonl.gz", "*.npz"],
         ignore_patterns=["._*"],  # Apple Double files
         num_workers=num_workers,
     )
 
 
 def _is_data_file(name: str) -> bool:
-    """A reconcilable data file: an extracted Parquet table or a source shard."""
-    return name.endswith(".parquet") or name.endswith(".jsonl.gz")
+    """A reconcilable data file: an extracted Parquet table, CSR matrix, or a source shard."""
+    return name.endswith(".parquet") or name.endswith(".jsonl.gz") or name.endswith(".npz")
 
 
 def _hf_prune(repo_id: str) -> None:

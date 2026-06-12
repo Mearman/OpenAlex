@@ -209,6 +209,27 @@ data/{entity}/
 
 The dataset viewer provides one subset per entity+relationship combination (e.g. `works__main`, `works__abstracts`, `authors__affiliations`) and one `__source` subset per entity for the raw JSONL.
 
+### CSR matrices
+
+The sync pipeline also produces Compressed Sparse Row (CSR) matrices for relationship tables that encode directed edges between integer node IDs. These are stored as scipy `.npz` files:
+
+```
+csr/
+  work_referenced_works.npz    # citation graph (work → referenced work)
+  work_authorships.npz         # authorship graph
+  work_topics.npz              # work-topic associations
+  ...
+```
+
+Each file contains a single sparse adjacency matrix. Row/column indices correspond to OpenAlex entity IDs. Provenance metadata is stored alongside as `.provenance.json`.
+
+Build with:
+
+```bash
+python3 -m sync.build_csr --all
+python3 -m sync.build_csr --rel-type work_referenced_works
+```
+
 ### Example: Work record fields
 
 `id`, `doi`, `title`, `display_name`, `publication_year`, `type`, `language`, `authorships`, `concepts`, `topics`, `keywords`, `cited_by_count`, `referenced_works`, `related_works`, `locations`, `open_access`, `funders`, `awards`, `mesh`, `sustainable_development_goals`, `counts_by_year`, `updated_date`, and more.
