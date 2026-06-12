@@ -304,7 +304,12 @@ def _build_csr_duckdb(
         original_ids = pq.read_table(
             str(tmp_ids), columns=["id"]
         ).column("id").to_numpy()
-        tmp_ids = None  # file read; finally block will not re-delete
+        # IDs read; delete temp file now since the finally block's
+        # tmp_ids reference must stay valid for the error path.
+        try:
+            tmp_ids.unlink()
+        except OSError:
+            pass
 
         # Step 4: Read edges in chunks, remap to dense indices via
         # binary search (original_ids is sorted), and accumulate CSR
