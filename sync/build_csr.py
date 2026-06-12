@@ -350,7 +350,7 @@ def _build_csr_duckdb(
         indices = np.concatenate(indices_chunks)
         del indices_chunks
 
-        data = np.ones(n_edges, dtype=np.float64)
+        data = np.ones(n_edges, dtype=np.float32)
         csr = sparse.csr_matrix(
             (data, indices, indptr),
             shape=(n_nodes, n_nodes),
