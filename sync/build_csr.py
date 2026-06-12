@@ -93,26 +93,17 @@ _CSR_RELATIONSHIP_TYPES: dict[str, tuple[str, str]] = {
     "work_authorships": ("work_id", "authorship_id"),
     "work_topics": ("work_id", "topic_id"),
     "work_concepts": ("work_id", "concept_id"),
-    "work_locations": ("work_id", "location_id"),
     "work_related": ("work_id", "related_work_id"),
     "work_funders": ("work_id", "funder_id"),
     "work_keywords": ("work_id", "keyword_id"),
-    # Authors
-    "author_institutions": ("author_id", "institution_id"),
-    # Sources
-    "source_host_lineage": ("source_id", "host_id"),
     # Institutions
-    "institution_associations": ("institution_id", "associated_id"),
-    "institution_repositories": ("institution_id", "repository_id"),
-    "institution_roles": ("institution_id", "role_id"),
+    "institution_repositories": ("institution_id", "repositorie_id"),
+    "institution_roles": ("institution_id", "role_entity_id"),
     # Publishers
-    "publisher_lineage": ("publisher_id", "parent_id"),
-    "publisher_roles": ("publisher_id", "role_id"),
+    "publisher_lineage": ("publisher_id", "lineage_id"),
+    "publisher_roles": ("publisher_id", "role_entity_id"),
     # Funders
-    "funder_roles": ("funder_id", "role_id"),
-    # Concepts
-    "concept_ancestors": ("concept_id", "ancestor_id"),
-    "concept_related": ("concept_id", "related_id"),
+    "funder_roles": ("funder_id", "role_entity_id"),
 }
 
 
