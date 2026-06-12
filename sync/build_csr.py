@@ -95,7 +95,6 @@ _CSR_RELATIONSHIP_TYPES: dict[str, tuple[str, str]] = {
     "work_concepts": ("work_id", "concept_id"),
     "work_related": ("work_id", "related_work_id"),
     "work_funders": ("work_id", "funder_id"),
-    "work_keywords": ("work_id", "keyword_id"),
     # Institutions
     "institution_repositories": ("institution_id", "repositorie_id"),
     "institution_roles": ("institution_id", "role_entity_id"),
