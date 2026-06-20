@@ -64,6 +64,17 @@ _BATCH_SIZE = 500_000
 _PROGRESS_INTERVAL = 1_000_000
 _DEFAULT_WORKERS = 6
 
+# Parquet compression for extracted shards. zstd at a low level is ~30% smaller
+# than snappy on this data (mostly integer ID columns that Parquet already
+# dictionary/RLE-encodes, plus the text-heavy abstracts table) while reading at
+# least as fast — the smaller files mean less I/O on every downstream scan and,
+# at snapshot scale, materially less storage and HuggingFace upload bandwidth.
+# Level 3 is the balance point: levels above it buy only a few more percent for
+# a growing CPU cost, and extraction is JSON-parse-bound so the codec barely
+# moves wall-clock either way.
+_PARQUET_COMPRESSION = "zstd"
+_PARQUET_COMPRESSION_LEVEL = 3
+
 # Memory model: reserve ~2 GB for the OS and assume each worker peaks
 # around 6 GB resident (zstd compressor + PyArrow batch + Python heap).
 # Empirically, 8 workers on 16 GB causes swap thrashing; 8 on 64 GB is fine.
@@ -899,7 +910,12 @@ class _SourceFileWriter:
             write_dir = self.staging_dir if self.staging_dir else self.output_dir
             write_dir.mkdir(parents=True, exist_ok=True)
             out_path = write_dir / self._shard_name
-            self._writer = pq.ParquetWriter(out_path, self.schema, compression="snappy")
+            self._writer = pq.ParquetWriter(
+                out_path,
+                self.schema,
+                compression=_PARQUET_COMPRESSION,
+                compression_level=_PARQUET_COMPRESSION_LEVEL,
+            )
             self._current_path = out_path
         return self._writer
 
@@ -925,13 +941,23 @@ class _SourceFileWriter:
             out_path = write_dir / self._shard_name
             # Write empty parquet as completion marker
             if self.schema is not None:
-                with pq.ParquetWriter(out_path, self.schema, compression="snappy") as w:
+                with pq.ParquetWriter(
+                    out_path,
+                    self.schema,
+                    compression=_PARQUET_COMPRESSION,
+                    compression_level=_PARQUET_COMPRESSION_LEVEL,
+                ) as w:
                     pass  # empty file with schema
             else:
                 # No data was ever written — create a minimal empty parquet
                 empty_schema = pa.schema([pa.field("_placeholder", pa.int64())])
                 empty_table = pa.table({"_placeholder": pa.array([], type=pa.int64())})
-                pq.write_table(empty_table, out_path, compression="snappy")
+                pq.write_table(
+                    empty_table,
+                    out_path,
+                    compression=_PARQUET_COMPRESSION,
+                    compression_level=_PARQUET_COMPRESSION_LEVEL,
+                )
             self._current_path = out_path
 
         if self._writer is not None:
