@@ -526,6 +526,182 @@ def build_all_csr(
     return results
 
 
+# ── Edge-list export ─────────────────────────────────────────────────────
+
+
+def build_edge_list(
+    rel_type: str,
+    *,
+    parquet_dir: Path | None = None,
+    output_dir: Path | None = None,
+    force: bool = False,
+    memory_limit: str | None = None,
+) -> dict:
+    """Export a relationship as a sorted, deduplicated edge-list Parquet.
+
+    Writes ``<rel_type>__by_src.parquet`` with columns ``(src, tgt)`` in the
+    original OpenAlex IDs — so it joins the ``main`` and relationship tables
+    directly, no dense-index/id-map indirection.  The edges are deduplicated
+    and sorted by ``(src, tgt)`` with bounded row groups, so DuckDB (or any
+    Parquet reader) prunes ``WHERE src = X`` lookups ("what X cites") to a
+    few row groups instead of loading the whole graph.
+
+    A complement to the CSR ``.npz``: the matrix is built for in-RAM linear
+    algebra, this is for out-of-core SQL queries over the same edges.
+
+    Idempotent (provenance fingerprint of the input shards) and atomic
+    (temp file + ``os.replace``), matching :func:`build_csr`.
+    """
+    if duckdb is None:
+        raise ImportError("duckdb is required for edge-list export")
+
+    _parquet_dir = parquet_dir or _resolve_parquet_dir()
+    _output_dir = output_dir or _resolve_csr_dir()
+
+    if rel_type not in _CSR_RELATIONSHIP_TYPES:
+        return {"error": f"Unknown relationship type: {rel_type}"}
+
+    src_col, tgt_col = _CSR_RELATIONSHIP_TYPES[rel_type]
+    parquet_files = _find_parquet_shards(_parquet_dir, rel_type)
+    if not parquet_files:
+        return {"error": f"No parquet shards found for {rel_type}"}
+
+    output_path = _output_dir / f"{rel_type}__by_src.parquet"
+    fingerprint = _input_fingerprint(parquet_files)
+
+    # Idempotency check
+    if not force and output_path.exists():
+        existing = _load_provenance(output_path)
+        if existing and existing.get("input_fingerprint") == fingerprint:
+            log.info(
+                "%s edge-list: up-to-date (%d shards, fingerprint %s), skipping",
+                rel_type, len(parquet_files), fingerprint,
+            )
+            return {
+                "rel_type": rel_type,
+                "status": "skipped",
+                "n_edges": existing.get("n_edges", 0),
+                "shard_count": len(parquet_files),
+            }
+
+    log.info(
+        "%s edge-list: exporting from %d shards (fingerprint %s)",
+        rel_type, len(parquet_files), fingerprint,
+    )
+    t0 = time.time()
+
+    _output_dir.mkdir(parents=True, exist_ok=True)
+    glob_pattern = str(parquet_files[0].parent / "*.parquet")
+
+    # Atomic: write to a temp file, then os.replace into place.
+    fd, tmp_path = tempfile.mkstemp(
+        dir=_output_dir, prefix=".tmp-edges-", suffix=".parquet"
+    )
+    os.close(fd)
+    try:
+        con = duckdb.connect(":memory:")
+        try:
+            # Give the DISTINCT and ORDER BY a spill target so they can
+            # exceed RAM (an in-memory connection won't otherwise spill).
+            con.execute(f"SET temp_directory='{_output_dir}'")
+            if memory_limit:
+                con.execute(f"SET memory_limit='{memory_limit}'")
+            con.execute(f"""
+                COPY (
+                    SELECT DISTINCT
+                        CAST("{src_col}" AS UBIGINT) AS src,
+                        CAST("{tgt_col}" AS UBIGINT) AS tgt
+                    FROM read_parquet('{glob_pattern}')
+                    WHERE "{src_col}" IS NOT NULL
+                      AND "{tgt_col}" IS NOT NULL
+                    ORDER BY src, tgt
+                ) TO '{tmp_path}' (
+                    FORMAT PARQUET,
+                    COMPRESSION zstd,
+                    COMPRESSION_LEVEL 3,
+                    ROW_GROUP_SIZE 1000000
+                )
+            """)
+            n_edges = con.execute(
+                f"SELECT COUNT(*) FROM read_parquet('{tmp_path}')"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        os.replace(tmp_path, output_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    _write_provenance(
+        output_path,
+        rel_type=rel_type,
+        n_edges=n_edges,
+        n_nodes=0,  # not meaningful for an edge list
+        shard_count=len(parquet_files),
+        input_fingerprint=fingerprint,
+    )
+
+    elapsed = time.time() - t0
+    output_size = output_path.stat().st_size
+    log.info(
+        "%s edge-list: %d edges, %.2f GB, %.1fs",
+        rel_type, n_edges, output_size / 1e9, elapsed,
+    )
+
+    return {
+        "rel_type": rel_type,
+        "status": "built",
+        "n_edges": n_edges,
+        "shard_count": len(parquet_files),
+        "output_path": str(output_path),
+        "output_size_bytes": output_size,
+        "elapsed_seconds": elapsed,
+    }
+
+
+def build_all_edge_lists(
+    *,
+    parquet_dir: Path | None = None,
+    output_dir: Path | None = None,
+    force: bool = False,
+    memory_limit: str | None = None,
+    rel_types: list[str] | None = None,
+) -> list[dict]:
+    """Export edge-list Parquets for all (or specified) relationship types."""
+    _output_dir = output_dir or _resolve_csr_dir()
+    _output_dir.mkdir(parents=True, exist_ok=True)
+
+    _clean_orphan_temps(_output_dir)
+
+    types = rel_types or list(_CSR_RELATIONSHIP_TYPES.keys())
+    results: list[dict] = []
+
+    for rel_type in types:
+        result = build_edge_list(
+            rel_type,
+            parquet_dir=parquet_dir,
+            output_dir=_output_dir,
+            force=force,
+            memory_limit=memory_limit,
+        )
+        results.append(result)
+        if "error" in result:
+            log.warning("%s: %s", rel_type, result["error"])
+
+    built = sum(1 for r in results if r.get("status") == "built")
+    skipped = sum(1 for r in results if r.get("status") == "skipped")
+    failed = sum(1 for r in results if "error" in r)
+    log.info(
+        "Edge-list export complete: %d built, %d skipped, %d failed",
+        built, skipped, failed,
+    )
+
+    return results
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────
 
 
@@ -570,6 +746,13 @@ def main(argv: list[str] | None = None) -> int:
         help="DuckDB memory limit (e.g. '32GB') "
              f"(default: env {_MEMORY_LIMIT_ENV} or none)",
     )
+    parser.add_argument(
+        "--edge-list",
+        action="store_true",
+        help="Export sorted, deduplicated edge-list Parquet "
+             "(<rel>__by_src.parquet) instead of CSR matrices — queryable "
+             "directly in DuckDB without loading the whole graph",
+    )
 
     args = parser.parse_args(argv)
 
@@ -584,7 +767,8 @@ def main(argv: list[str] | None = None) -> int:
 
     memory = args.memory_limit or os.environ.get(_MEMORY_LIMIT_ENV)
 
-    results = build_all_csr(
+    builder = build_all_edge_lists if args.edge_list else build_all_csr
+    results = builder(
         parquet_dir=args.parquet_dir,
         output_dir=args.output_dir,
         force=args.force,
