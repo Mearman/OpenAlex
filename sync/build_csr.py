@@ -224,11 +224,16 @@ def _build_csr_duckdb(
     contiguous range [0, n_unique_nodes) to keep the indptr array
     small.  The remapping is deterministic: sorted by original ID.
 
-    DuckDB reads all shards, deduplicates edges, and writes intermediate
-    results to temporary parquet files.  Python reads these in chunks via
-    pyarrow, keeping peak memory bounded regardless of edge count.
-    ``work_referenced_works`` (~3B deduplicated edges) fits in 64 GB
-    with this approach, where ``fetchall()`` needed ~240 GB.
+    DuckDB does the whole remap.  It builds a dense ``id -> idx`` dimension
+    table (``row_number() OVER (ORDER BY id)``), joins the deduplicated
+    edges against it twice, and writes the already-dense, already-sorted
+    ``(src_idx, tgt_idx)`` pairs to a temporary parquet file.  Python then
+    streams that file straight into the preallocated CSR arrays — no
+    per-batch binary search over the id array, which on the ~3B-edge
+    work_referenced_works would dominate the build: each such lookup misses
+    cache on the multi-GB sorted id array.  Python holds the id array (for
+    the id map), ``indptr``, ``indices`` and one batch; the remap join and
+    its spill stay inside DuckDB, bounded by ``memory_limit``.
     """
     if duckdb is None:
         raise ImportError("duckdb is required for CSR building")
@@ -246,45 +251,61 @@ def _build_csr_duckdb(
     try:
         con = duckdb.connect(":memory:")
         try:
+            # Give the dim-table window, the joins and the final sort a spill
+            # target so they can exceed RAM — essential under a tight
+            # memory_limit, since an in-memory connection won't otherwise
+            # spill.  output_path.parent is the (already-created) CSR dir.
+            con.execute(f"SET temp_directory='{output_path.parent}'")
             if memory_limit:
                 con.execute(f"SET memory_limit='{memory_limit}'")
 
-            # Step 1: Collect all unique node IDs, sorted deterministically.
+            # Step 1: Build the dense id -> idx dimension table.  The dense
+            # index is the rank of the ID in sorted order, so the mapping is
+            # deterministic and id-sorted, exactly as the indptr layout needs.
             # DuckDB spills to disk if the set exceeds memory_limit.
             log.info("Collecting unique node IDs...")
             con.execute(f"""
-                COPY (
-                    WITH all_ids AS (
-                        SELECT DISTINCT CAST("{src_col}" AS UBIGINT) AS id
-                        FROM read_parquet('{glob_pattern}')
-                        WHERE "{src_col}" IS NOT NULL
-                        UNION ALL
-                        SELECT DISTINCT CAST("{tgt_col}" AS UBIGINT) AS id
-                        FROM read_parquet('{glob_pattern}')
-                        WHERE "{tgt_col}" IS NOT NULL
-                    )
-                    SELECT DISTINCT id
-                    FROM all_ids
-                    ORDER BY id
-                ) TO '{tmp_ids}' (FORMAT PARQUET)
-            """)
-            n_nodes = con.execute(
-                f"SELECT COUNT(*) FROM read_parquet('{tmp_ids}')"
-            ).fetchone()[0]
-            log.info("Unique nodes: %d", n_nodes)
-
-            # Step 2: Deduplicated edges sorted by (src, tgt).
-            # Still using original IDs — remapping happens in Python.
-            log.info("Deduplicating and sorting edges...")
-            con.execute(f"""
-                COPY (
-                    SELECT DISTINCT
-                        CAST("{src_col}" AS UBIGINT) AS src,
-                        CAST("{tgt_col}" AS UBIGINT) AS tgt
+                CREATE TABLE ids AS
+                SELECT id, (row_number() OVER (ORDER BY id) - 1) AS idx
+                FROM (
+                    SELECT CAST("{src_col}" AS UBIGINT) AS id
                     FROM read_parquet('{glob_pattern}')
                     WHERE "{src_col}" IS NOT NULL
-                      AND "{tgt_col}" IS NOT NULL
-                    ORDER BY src, tgt
+                    UNION
+                    SELECT CAST("{tgt_col}" AS UBIGINT) AS id
+                    FROM read_parquet('{glob_pattern}')
+                    WHERE "{tgt_col}" IS NOT NULL
+                )
+            """)
+            n_nodes = con.execute("SELECT COUNT(*) FROM ids").fetchone()[0]
+            log.info("Unique nodes: %d", n_nodes)
+
+            # Emit the id map in dense order (idx is monotone in id, so
+            # ORDER BY idx == ORDER BY id): original_ids[dense_idx] = id.
+            con.execute(
+                f"COPY (SELECT id FROM ids ORDER BY idx) "
+                f"TO '{tmp_ids}' (FORMAT PARQUET)"
+            )
+
+            # Step 2: Deduplicate edges, remap both endpoints to dense
+            # indices via the dimension table, and sort by (src_idx, tgt_idx).
+            # Because idx is monotone in id, this order equals the (src, tgt)
+            # id order — the CSR row/column ordering the indptr build assumes.
+            log.info("Deduplicating, remapping and sorting edges...")
+            con.execute(f"""
+                COPY (
+                    SELECT s.idx AS src_idx, t.idx AS tgt_idx
+                    FROM (
+                        SELECT DISTINCT
+                            CAST("{src_col}" AS UBIGINT) AS src,
+                            CAST("{tgt_col}" AS UBIGINT) AS tgt
+                        FROM read_parquet('{glob_pattern}')
+                        WHERE "{src_col}" IS NOT NULL
+                          AND "{tgt_col}" IS NOT NULL
+                    ) e
+                    JOIN ids s ON e.src = s.id
+                    JOIN ids t ON e.tgt = t.id
+                    ORDER BY src_idx, tgt_idx
                 ) TO '{tmp_edges}' (FORMAT PARQUET)
             """)
             n_edges = con.execute(
@@ -298,9 +319,10 @@ def _build_csr_duckdb(
         if n_edges == 0:
             return sparse.csr_matrix((0, 0), dtype=np.float64), np.array([], dtype=np.uint64)
 
-        # Step 3: Read the sorted unique IDs — this is the dense mapping.
-        # original_ids[dense_idx] = original OpenAlex ID.
-        # ~2 GB for 250M nodes (uint64), well within memory.
+        # Step 3: Read the dense-ordered IDs for the returned id map:
+        # original_ids[dense_idx] = original OpenAlex ID.  The remap itself
+        # already happened in DuckDB, so this array is only the output
+        # mapping.  ~2 GB for 250M nodes (uint64), well within memory.
         original_ids = pq.read_table(
             str(tmp_ids), columns=["id"]
         ).column("id").to_numpy()
@@ -311,9 +333,10 @@ def _build_csr_duckdb(
         except OSError:
             pass
 
-        # Step 4: Read edges in chunks, remap to dense indices via
-        # binary search (original_ids is sorted), and accumulate CSR
-        # components.  Peak memory per batch: ~80 MB (5M rows × 16 bytes).
+        # Step 4: Stream the already-dense, already-sorted edges into the CSR
+        # components.  The remap happened in DuckDB, so per batch this is just
+        # a copy plus a bincount — no binary search.  Peak memory per batch:
+        # ~40 MB (5M rows × 8 bytes).
         #
         # The CSR ``indices`` array is the full deduplicated tgt-index set
         # (~12 GB for work_referenced_works's ~3B edges), so it is
@@ -330,20 +353,13 @@ def _build_csr_duckdb(
 
         pf = pq.ParquetFile(str(tmp_edges))
         for batch in pf.iter_batches(batch_size=5_000_000):
-            src = batch.column("src").to_numpy()
-            tgt = batch.column("tgt").to_numpy()
-
-            # Dense remap via binary search (monotone mapping).
-            # Since original_ids is sorted and edges are sorted by
-            # (src, tgt), the resulting (src_idx, tgt_idx) are also
-            # sorted — no re-sorting needed.
-            src_idx = np.searchsorted(original_ids, src).astype(np.int32)
-            tgt_idx = np.searchsorted(original_ids, tgt).astype(np.int32)
+            src_idx = batch.column("src_idx").to_numpy()
+            tgt_idx = batch.column("tgt_idx").to_numpy().astype(np.int32)
 
             # Append this batch's column indices into the preallocated array.
-            # Edges arrive in (src, tgt) order, so writing them in batch
-            # order keeps ``indices`` grouped by source node — exactly the
-            # CSR layout that ``indptr`` describes.
+            # Edges arrive in (src_idx, tgt_idx) order, so writing them in
+            # batch order keeps ``indices`` grouped by source node — exactly
+            # the CSR layout that ``indptr`` describes.
             indices[offset:offset + len(tgt_idx)] = tgt_idx
             offset += len(tgt_idx)
 
@@ -352,7 +368,7 @@ def _build_csr_duckdb(
             indptr[1:] += counts
 
             batch_count += 1
-            log.debug("Processed batch %d (%d rows)", batch_count, len(src))
+            log.debug("Processed batch %d (%d rows)", batch_count, len(src_idx))
 
         # All deduplicated edges must have been placed exactly once.
         assert offset == n_edges, f"placed {offset} indices, expected {n_edges}"
