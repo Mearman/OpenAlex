@@ -230,6 +230,23 @@ python3 -m sync.build_csr --all
 python3 -m sync.build_csr --rel-type work_referenced_works
 ```
 
+### Edge-list Parquet
+
+For querying the graph in DuckDB/Arrow without loading a whole matrix into memory, `--edge-list` exports each relationship as a sorted, deduplicated edge list in the original OpenAlex IDs (so it joins the `main` and relationship tables directly):
+
+```
+csr/
+  work_referenced_works__by_src.parquet   # (src, tgt), sorted by src
+  ...
+```
+
+Sorted with bounded row groups, so `WHERE src = X` ("what X cites") prunes to a few row groups — millisecond range scans against the full graph.
+
+```bash
+python3 -m sync.build_csr --all --edge-list
+duckdb -c "SELECT tgt FROM 'csr/work_referenced_works__by_src.parquet' WHERE src = 2741809807"
+```
+
 ### Example: Work record fields
 
 `id`, `doi`, `title`, `display_name`, `publication_year`, `type`, `language`, `authorships`, `concepts`, `topics`, `keywords`, `cited_by_count`, `referenced_works`, `related_works`, `locations`, `open_access`, `funders`, `awards`, `mesh`, `sustainable_development_goals`, `counts_by_year`, `updated_date`, and more.
