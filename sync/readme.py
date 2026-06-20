@@ -232,19 +232,21 @@ python3 -m sync.build_csr --rel-type work_referenced_works
 
 ### Edge-list Parquet
 
-For querying the graph in DuckDB/Arrow without loading a whole matrix into memory, `--edge-list` exports each relationship as a sorted, deduplicated edge list in the original OpenAlex IDs (so it joins the `main` and relationship tables directly):
+For querying the graph in DuckDB/Arrow without loading a whole matrix into memory, `--edge-list` exports each relationship as a sorted, deduplicated edge list in the original OpenAlex IDs (so it joins the `main` and relationship tables directly), in both directions:
 
 ```
 csr/
   work_referenced_works__by_src.parquet   # (src, tgt), sorted by src
+  work_referenced_works__by_tgt.parquet   # (src, tgt), sorted by tgt
   ...
 ```
 
-Sorted with bounded row groups, so `WHERE src = X` ("what X cites") prunes to a few row groups — millisecond range scans against the full graph.
+Each file's bounded, sorted row groups let zonemaps prune that direction's lookups to a few row groups — millisecond range scans against the full graph. `by_src` answers "what X cites" (`WHERE src = X`); `by_tgt` answers "who cites X" (`WHERE tgt = X`).
 
 ```bash
 python3 -m sync.build_csr --all --edge-list
-duckdb -c "SELECT tgt FROM 'csr/work_referenced_works__by_src.parquet' WHERE src = 2741809807"
+duckdb -c "SELECT tgt FROM 'csr/work_referenced_works__by_src.parquet' WHERE src = 2741809807"  # what it cites
+duckdb -c "SELECT src FROM 'csr/work_referenced_works__by_tgt.parquet' WHERE tgt = 2741809807"  # who cites it
 ```
 
 ### Example: Work record fields

@@ -30,8 +30,8 @@ def _write_shard(shard_dir, edges, index=0):
     )
 
 
-def _build(tmp_path, edges=None, *, shards=None, force=True):
-    """Export the by_src edge list for ``edges`` (one shard) or ``shards``."""
+def _build(tmp_path, edges=None, *, shards=None, force=True, direction="src"):
+    """Export the by_<direction> edge list for ``edges`` (one shard) or ``shards``."""
     groups = shards if shards is not None else [edges]
     parquet_dir = tmp_path / "data"
     shard_dir = build_csr.rt_dir(parquet_dir, REL)
@@ -39,9 +39,10 @@ def _build(tmp_path, edges=None, *, shards=None, force=True):
         _write_shard(shard_dir, grp, i)
     out_dir = tmp_path / "csr"
     result = build_csr.build_edge_list(
-        REL, parquet_dir=parquet_dir, output_dir=out_dir, force=force
+        REL, parquet_dir=parquet_dir, output_dir=out_dir, force=force,
+        direction=direction,
     )
-    return result, out_dir / f"{REL}__by_src.parquet"
+    return result, out_dir / f"{REL}__by_{direction}.parquet"
 
 
 def _read(path):
@@ -103,3 +104,41 @@ def test_empty_relationship_yields_empty_edge_list(tmp_path):
     result, path = _build(tmp_path, [])
     assert result["n_edges"] == 0
     assert _read(path) == []
+
+
+def test_by_tgt_is_sorted_by_tgt(tmp_path):
+    edges = [(10, 30), (40, 10), (20, 30), (10, 20), (40, 10)]  # dup (40, 10)
+    _, path = _build(tmp_path, edges, direction="tgt")
+    got = _read(path)
+    expected = sorted({(s, t) for s, t in edges}, key=lambda e: (e[1], e[0]))
+    assert got == expected            # deduped, sorted by (tgt, src)
+    assert got == sorted(got, key=lambda e: (e[1], e[0]))
+
+
+def test_by_tgt_is_queryable_by_tgt_in_duckdb(tmp_path):
+    edges = [(10, 99), (20, 99), (30, 99), (40, 50)]
+    _, path = _build(tmp_path, edges, direction="tgt")
+    con = duckdb.connect()
+    rows = con.execute(
+        f"SELECT src FROM read_parquet('{path}') WHERE tgt = 99 ORDER BY src"
+    ).fetchall()
+    assert [r[0] for r in rows] == [10, 20, 30]
+
+
+def test_both_directions_hold_the_same_edge_set(tmp_path):
+    edges = [(10, 30), (40, 10), (20, 30), (10, 20)]
+    _, src_path = _build(tmp_path / "s", edges, direction="src")
+    _, tgt_path = _build(tmp_path / "t", edges, direction="tgt")
+    assert set(_read(src_path)) == set(_read(tgt_path))
+
+
+def test_build_all_emits_both_directions(tmp_path):
+    parquet_dir = tmp_path / "data"
+    _write_shard(build_csr.rt_dir(parquet_dir, REL), [(1, 2), (2, 3)])
+    out_dir = tmp_path / "csr"
+    results = build_csr.build_all_edge_lists(
+        parquet_dir=parquet_dir, output_dir=out_dir, rel_types=[REL]
+    )
+    assert {r["direction"] for r in results} == {"src", "tgt"}
+    assert (out_dir / f"{REL}__by_src.parquet").exists()
+    assert (out_dir / f"{REL}__by_tgt.parquet").exists()
