@@ -314,8 +314,18 @@ def _build_csr_duckdb(
         # Step 4: Read edges in chunks, remap to dense indices via
         # binary search (original_ids is sorted), and accumulate CSR
         # components.  Peak memory per batch: ~80 MB (5M rows × 16 bytes).
+        #
+        # The CSR ``indices`` array is the full deduplicated tgt-index set
+        # (~12 GB for work_referenced_works's ~3B edges), so it is
+        # preallocated at its final size and filled slice-by-slice as the
+        # batches stream in.  Collecting per-batch arrays in a list and
+        # ``np.concatenate``-ing at the end would transiently hold both the
+        # list and the joined array — doubling that 12 GB at the worst
+        # possible moment.  The edge count is known exactly (``n_edges``),
+        # so the single allocation is safe.
         indptr = np.zeros(n_nodes + 1, dtype=np.int64)
-        indices_chunks: list[np.ndarray] = []
+        indices = np.empty(n_edges, dtype=np.int32)
+        offset = 0
         batch_count = 0
 
         pf = pq.ParquetFile(str(tmp_edges))
@@ -330,7 +340,12 @@ def _build_csr_duckdb(
             src_idx = np.searchsorted(original_ids, src).astype(np.int32)
             tgt_idx = np.searchsorted(original_ids, tgt).astype(np.int32)
 
-            indices_chunks.append(tgt_idx)
+            # Append this batch's column indices into the preallocated array.
+            # Edges arrive in (src, tgt) order, so writing them in batch
+            # order keeps ``indices`` grouped by source node — exactly the
+            # CSR layout that ``indptr`` describes.
+            indices[offset:offset + len(tgt_idx)] = tgt_idx
+            offset += len(tgt_idx)
 
             # Count edges per source node for indptr construction.
             counts = np.bincount(src_idx, minlength=n_nodes)
@@ -339,11 +354,11 @@ def _build_csr_duckdb(
             batch_count += 1
             log.debug("Processed batch %d (%d rows)", batch_count, len(src))
 
+        # All deduplicated edges must have been placed exactly once.
+        assert offset == n_edges, f"placed {offset} indices, expected {n_edges}"
+
         # Build CSR indptr (cumulative sum of per-row edge counts).
         np.cumsum(indptr, out=indptr)
-
-        indices = np.concatenate(indices_chunks)
-        del indices_chunks
 
         data = np.ones(n_edges, dtype=np.float32)
         csr = sparse.csr_matrix(
