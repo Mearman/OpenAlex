@@ -39,9 +39,26 @@ try:
 except ImportError:
     pq = None
 
-from sync.common import SNAPSHOT_DIR, rt_dir
+log = logging.getLogger("build_combined_csr")
 
-log = logging.getLogger("sync.build_combined_csr")
+
+def _rt_dir(parquet_dir, rel_type):
+    """Map a relationship type to its parquet subdirectory path.
+
+    Mirrors sync.common.nested_rt_path: {entity}_{subtable} → {entity}s/{subtable}.
+    """
+    _NESTED = {
+        "work_referenced_works": "works/referenced_works",
+        "work_authorships": "works/authorships",
+        "work_topics": "works/topics",
+        "work_concepts": "works/concepts",
+        "work_funders": "works/funders",
+        "institution_roles": "institutions/roles",
+        "publisher_lineage": "publishers/lineage",
+        "funder_roles": "funders/roles",
+    }
+    sub = _NESTED.get(rel_type, rel_type)
+    return parquet_dir / sub
 
 # Same mapping as build_csr.py
 _RELATIONSHIP_TYPES: dict[str, tuple[str, str]] = {
@@ -61,6 +78,7 @@ def build_combined_csr(
     parquet_dir: Path,
     output_path: Path,
     memory_limit: str = "128G",
+    temp_dir: Path | None = None,
 ) -> None:
     """Build a single CSR merging multiple relationship types."""
     if duckdb is None:
@@ -74,7 +92,7 @@ def build_combined_csr(
         if rt not in _RELATIONSHIP_TYPES:
             raise ValueError(f"Unknown relationship type: {rt}")
         src_col, tgt_col = _RELATIONSHIP_TYPES[rt]
-        shard_dir = rt_dir(parquet_dir, rt)
+        shard_dir = _rt_dir(parquet_dir, rt)
         if not shard_dir.exists():
             log.warning("Skipping %s: directory not found (%s)", rt, shard_dir)
             continue
@@ -85,14 +103,27 @@ def build_combined_csr(
     if not rel_globs:
         raise RuntimeError("No valid relationship types found")
 
-    tmp_ids = output_path.with_suffix(".tmp_ids.parquet")
-    tmp_edges = output_path.with_suffix(".tmp_edges.parquet")
+    # Transient spill (DuckDB temp + the sorted ID/edge shards) goes to a
+    # dedicated temp dir, defaulting to node-local $TMPDIR. For a 5B-edge graph
+    # the dedup/sort spills hundreds of GB; keeping it off the scratch project
+    # quota (and on node-local SSD) avoids "Disk quota exceeded" and is faster.
+    # Only the final CSR is written to output_path (scratch).
+    if temp_dir is None:
+        temp_dir = Path(
+            os.environ.get("CSR_TEMP_DIR", os.environ.get("TMPDIR", output_path.parent))
+        )
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    log.info("Using temp dir: %s", temp_dir)
+    tmp_ids = temp_dir / (output_path.stem + ".tmp_ids.parquet")
+    tmp_edges = temp_dir / (output_path.stem + ".tmp_edges.parquet")
 
     try:
         con = duckdb.connect(":memory:")
         try:
             if memory_limit:
                 con.execute(f"SET memory_limit='{memory_limit}'")
+            # Spill to the off-scratch temp dir, not CWD's default .tmp/.
+            con.execute(f"SET temp_directory='{temp_dir}'")
 
             # Step 1: Collect ALL unique node IDs across ALL relationship types.
             log.info("Collecting unique node IDs across %d relationship types...", len(rel_globs))
@@ -240,12 +271,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--parquet-dir",
-        default=os.environ.get("OPENALEX_PARQUET_DIR", str(SNAPSHOT_DIR / "data")),
+        default=os.environ.get("OPENALEX_PARQUET_DIR", "data"),
         help="Parquet source directory (default: OPENALEX_PARQUET_DIR or <SNAPSHOT>/data)"
     )
     parser.add_argument(
         "--memory-limit", default="128G",
         help="DuckDB memory limit (default: 128G)"
+    )
+    parser.add_argument(
+        "--temp-dir", default=None,
+        help="Temp dir for DuckDB spill + sorted ID/edge shards (default: $CSR_TEMP_DIR, "
+             "else $TMPDIR, else the output dir). Use node-local scratch to avoid the "
+             "scratch project quota on multi-billion-edge builds."
     )
     args = parser.parse_args()
 
@@ -254,7 +291,10 @@ def main() -> None:
     output_path = Path(args.output)
 
     log.info("Building combined CSR: %s -> %s", rel_types, output_path)
-    build_combined_csr(rel_types, parquet_dir, output_path, args.memory_limit)
+    build_combined_csr(
+        rel_types, parquet_dir, output_path, args.memory_limit,
+        temp_dir=Path(args.temp_dir) if args.temp_dir else None,
+    )
 
 
 if __name__ == "__main__":
