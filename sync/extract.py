@@ -21,7 +21,9 @@ import os
 from functools import lru_cache
 import multiprocessing
 import shutil
+import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -29,6 +31,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from sync.common import (
+    ARCHIVE_DIR,
     SNAPSHOT_DIR,
     STAGING_DIR,
     extract_id,
@@ -953,6 +956,146 @@ class _SourceFileWriter:
             )
 
 
+# ── Disk-pressure spillover (ACTIVE only when OPENALEX_ARCHIVE is set) ──
+
+
+def _disk_usage_percent(path: str) -> float:
+    """Filesystem usage percentage for the path holding the output."""
+    usage = shutil.disk_usage(path)
+    return (usage.used / usage.total) * 100.0
+
+
+def _worker_pids() -> list[int]:
+    """PIDs of the fork-pool conversion workers, excluding this process.
+
+    The monitor runs in the parent, whose own PID must never be stopped:
+    a SIGSTOP on the parent would freeze the monitor with it.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "_worker_process_files"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    me = os.getpid()
+    return [int(x) for x in result.stdout.split() if x.strip() and int(x) != me]
+
+
+def _archive_largest_completed_type(
+    output_root: Path, rel_types: list[str], exclude: frozenset[str],
+) -> bool:
+    """Move the largest finalised relationship-type directory to ARCHIVE_DIR and symlink it back.
+
+    A type is finalised when _finalise_type has written its manifest
+    snapshot, the same marker the resume path trusts, so a directory is
+    only ever moved once its last shard and its provenance are on disk.
+    Returns whether anything was archived.
+    """
+    if ARCHIVE_DIR is None:
+        return False
+    candidates: list[tuple[int, Path]] = []
+    for rt in rel_types:
+        if rt in exclude:
+            continue
+        directory = rt_dir(output_root, rt)
+        if directory.is_symlink() or not (directory / "_manifest_snapshot.json").exists():
+            continue
+        size = sum(
+            f.stat(follow_symlinks=False).st_size
+            for f in directory.rglob("*") if f.is_file(follow_symlinks=False)
+        )
+        candidates.append((size, directory))
+    if not candidates:
+        log.info("No finalised relationship types to archive")
+        return False
+    candidates.sort(reverse=True)
+    size, directory = candidates[0]
+    dest = ARCHIVE_DIR / directory.relative_to(output_root)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        log.info("%s: already in archive, freeing the local copy", directory.name)
+        shutil.rmtree(directory, ignore_errors=True)
+    else:
+        try:
+            os.rename(directory, dest)
+        except OSError:
+            shutil.move(str(directory), str(dest))
+    directory.symlink_to(dest)
+    log.info(
+        "%s: archived to %s (%s freed)",
+        directory.name, dest, format_size(size),
+    )
+    return True
+
+
+class DiskMonitorThread(threading.Thread):
+    """Watch the output filesystem while conversion workers run.
+
+    When usage reaches the threshold, the workers are paused, the largest
+    finalised relationship-type directory spills over to ARCHIVE_DIR with
+    a symlink back, and the workers resume. A daemon: it acts only when
+    OPENALEX_ARCHIVE is set, and never stops the parent process.
+    """
+
+    def __init__(
+        self,
+        watch_path: str,
+        rel_types: list[str],
+        exclude: frozenset[str],
+        output_root: Path,
+        threshold_pct: float = 90.0,
+        check_interval: float = 30.0,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.watch_path = watch_path
+        self.rel_types = rel_types
+        self.exclude = exclude
+        self.output_root = output_root
+        self.threshold_pct = threshold_pct
+        self.check_interval = check_interval
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        if ARCHIVE_DIR is None:
+            return
+        log.info(
+            "Disk monitor: %s at %.0f%% spills over to %s (checking every %.0fs)",
+            self.watch_path, self.threshold_pct, ARCHIVE_DIR, self.check_interval,
+        )
+        while not self._stop_event.wait(self.check_interval):
+            try:
+                pct = _disk_usage_percent(self.watch_path)
+            except OSError:
+                continue
+            if pct < self.threshold_pct:
+                continue
+            log.warning("Output disk %.1f%% full, pausing workers to spill over", pct)
+            pids = _worker_pids()
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGSTOP)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if pids:
+                log.info("Paused %d workers", len(pids))
+            try:
+                _archive_largest_completed_type(self.output_root, self.rel_types, self.exclude)
+            finally:
+                for pid in pids:
+                    try:
+                        os.kill(pid, signal.SIGCONT)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                if pids:
+                    log.info("Resumed %d workers", len(pids))
+            log.info("Output disk %.1f%% full after spillover", _disk_usage_percent(self.watch_path))
+        log.info("Disk monitor stopped")
+
+
 # ── Worker entry point (must be module-level for multiprocessing) ───────
 
 
@@ -1330,6 +1473,14 @@ def convert_relationships(
 
     reset_skipped_files()
 
+    monitor = DiskMonitorThread(
+        watch_path=str(_output_dir),
+        rel_types=sorted(all_rel_types),
+        exclude=frozenset(all_pending_types),
+        output_root=_output_dir,
+    )
+    monitor.start()
+
     if actual_workers == 1:
         worker_results = [
             _worker_process_files(
@@ -1354,6 +1505,8 @@ def convert_relationships(
             worker_results = pool.map(
                 _worker_process_files, worker_args,
             )
+
+    monitor.stop()
 
     # Finalise each type independently
     for rt in all_pending_types:

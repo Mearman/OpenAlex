@@ -117,6 +117,18 @@ STAGING_DIR = (
     else None
 )
 
+# Spillover archive for completed relationship-type directories, on storage
+# outside the conversion output disk (set OPENALEX_ARCHIVE on a machine whose
+# output disk can fill mid-run). When set, extract.py's disk monitor moves
+# finalised relationship-type directories here and symlinks them back, so a
+# filling disk pauses conversion only for the move, never for good. Unset
+# means no spillover and no monitor.
+ARCHIVE_DIR = (
+    Path(os.environ.get("OPENALEX_ARCHIVE", ""))
+    if os.environ.get("OPENALEX_ARCHIVE")
+    else None
+)
+
 # ── I/O acceleration: orjson > json fallback ─────────────────────────────
 
 try:
