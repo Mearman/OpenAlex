@@ -1,5 +1,7 @@
 # OpenAlex Research Data
 
+[![GitHub](https://img.shields.io/badge/GitHub-181717?logo=github&logoColor=white)](https://github.com/Mearman/OpenAlex)
+
 Sync/extraction tooling for the OpenAlex scholarly metadata snapshot. The dataset itself lives on [HuggingFace](https://huggingface.co/datasets/Mearman/OpenAlex) (Git LFS via Xet storage).
 
 ## What's here
