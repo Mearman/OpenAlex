@@ -52,7 +52,7 @@ from sync.schema import (
     get_entity_schema,
 )
 
-log = logging.getLogger("openalex-sync")
+log = logging.getLogger("openalex.sync")
 
 # ── Batch thresholds ────────────────────────────────────────────────────
 

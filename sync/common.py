@@ -217,7 +217,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-log = logging.getLogger("openalex-sync")
+log = logging.getLogger("openalex.sync")
 
 # ── Skipped-file tracking ────────────────────────────────────────────────
 
