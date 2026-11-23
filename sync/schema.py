@@ -1906,7 +1906,7 @@ def _store_entity_schema(entity: str, schema: EntitySchema) -> None:
 _PROBE_CACHE_DIR = Path(
     os.environ.get(
         "OPENALEX_SCHEMA_CACHE_DIR",
-        str(Path.home() / ".cache" / "openalex-sync"),
+        str(Path.home() / ".cache" / "openalex-snapshot"),
     )
 ).expanduser()
 

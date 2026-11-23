@@ -47,7 +47,7 @@ SHARD_TIMEOUT = 600
 # At 100 shards/job = 19 works jobs, much more reasonable.
 MAX_SHARDS_PER_JOB = 100
 
-log = logging.getLogger("openalex-sync")
+log = logging.getLogger("openalex.sync")
 
 
 # ── Entity relationship types ────────────────────────────────────────────
@@ -730,7 +730,7 @@ def sync_shards(
         print(f"Syncing {total} shards ({entity_name}, schema pending first shard)")
 
     # Staging directory for downloaded files before they enter upload dir
-    staging_root = Path(tempfile.mkdtemp(prefix="openalex-sync-"))
+    staging_root = Path(tempfile.mkdtemp(prefix="openalex-snapshot-"))
     upload_dir = staging_root / "upload"
     upload_dir.mkdir()
 

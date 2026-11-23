@@ -18,7 +18,7 @@ from pathlib import Path
 
 from sync.common import format_size
 
-log = logging.getLogger("openalex-sync")
+log = logging.getLogger("openalex.sync")
 
 S3_BUCKET = "openalex"
 S3_PREFIX = "data/"
